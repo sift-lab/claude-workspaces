@@ -1,25 +1,72 @@
 import SwiftUI
 import WorkspacesCore
 
-/// What each session costs right now, and the total.
+enum UsageTab: Hashable { case now, week, machine }
+
+/// What the sessions spend: tokens now and over the week, and what they cost the machine.
 struct UsageView: View {
     @Environment(AppModel.self) private var model
     /// Order by memory, fixed when the screen opens or sessions come and go, so rows do not
     /// jump around every sample.
     @State private var order: [UUID] = []
+    @State private var tab: UsageTab = .now
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Color.clear.frame(height: 28)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Consumo").font(.system(size: 26, weight: .bold))
-                Text("Memória e CPU do Claude e dos servidores MCP de cada sessão, atualizados a cada 3 s.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.secondary)
-            }
-            .padding(.horizontal, 28)
-            .padding(.bottom, 20)
+            if let id = model.tokens.focused, let session = model.session(id) {
+                ScrollView {
+                    SessionTokensDetail(session: session)
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 28)
+                }
+            } else {
+                HStack(alignment: .bottom, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Consumo").font(.system(size: 26, weight: .bold))
+                        Text(subtitle)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.secondary)
+                    }
+                    Spacer()
+                    SegmentedSwitch(options: [("Agora", UsageTab.now), ("Semana", UsageTab.week), ("Máquina", UsageTab.machine)], selection: $tab)
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 20)
 
+                switch tab {
+                case .now:
+                    ScrollView { TokensNowView().padding(.horizontal, 28).padding(.bottom, 28) }
+                case .week:
+                    ScrollView { TokensWeekView().padding(.horizontal, 28).padding(.bottom, 28) }
+                case .machine:
+                    machine
+                }
+            }
+        }
+        .frame(minWidth: 1080, minHeight: 640)
+        .background(Theme.background)
+        .ignoresSafeArea()
+        .onAppear {
+            model.usageAppeared()
+            resort()
+            // Once more after the first full sample, which the opening sort cannot see yet.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { resort() }
+        }
+        .onChange(of: model.sessions.map(\.id)) { _, _ in resort() }
+        .onDisappear { model.usageDisappeared() }
+    }
+
+    private var subtitle: String {
+        switch tab {
+        case .now: return "Tokens das sessões abertas e o limite da sua conta, atualizados a cada resposta."
+        case .week: return "O gasto das últimas duas semanas: por dia, por workspace e por sessão."
+        case .machine: return "Memória e CPU do Claude e dos servidores MCP de cada sessão, atualizados a cada 3 s."
+        }
+    }
+
+    private var machine: some View {
+        VStack(alignment: .leading, spacing: 0) {
             summary
                 .padding(.horizontal, 28)
                 .padding(.bottom, 24)
@@ -38,17 +85,6 @@ struct UsageView: View {
                 .padding(.bottom, 28)
             }
         }
-        .frame(minWidth: 820, minHeight: 460)
-        .background(Theme.background)
-        .ignoresSafeArea()
-        .onAppear {
-            model.usageAppeared()
-            resort()
-            // Once more after the first full sample, which the opening sort cannot see yet.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { resort() }
-        }
-        .onChange(of: model.sessions.map(\.id)) { _, _ in resort() }
-        .onDisappear { model.usageDisappeared() }
     }
 
     // MARK: Summary

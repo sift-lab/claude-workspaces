@@ -12,6 +12,8 @@ public struct IPCRequest: Codable, Equatable, Sendable {
         case tool
         /// Which tools are enabled right now.
         case tools
+        /// Claude Code refreshed its status line; `payload` is what it passed (context, limits).
+        case statusLine
     }
 
     public var kind: Kind

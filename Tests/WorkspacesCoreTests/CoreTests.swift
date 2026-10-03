@@ -141,6 +141,20 @@ import Testing
     }
 }
 
+@Suite struct ProjectMatchTests {
+    @Test func picksTheMostSpecificProjectAndKeepsHomeExact() {
+        let home = Project(name: "pasta pessoal", path: "/Users/g")
+        let app = Project(name: "app", path: "/Users/g/dev/app")
+        let mobile = Project(name: "mobile", path: "/Users/g/dev/app/mobile")
+        let config = AppConfig(workspaces: [Workspace(name: "Geral", projects: [home]), Workspace(name: "Sift", projects: [app, mobile])])
+        #expect(config.project(containing: "/Users/g/dev/app/.claude/worktrees/x", home: "/Users/g")?.project.name == "app")
+        #expect(config.project(containing: "/Users/g/dev/app/mobile/ios", home: "/Users/g")?.project.name == "mobile")
+        #expect(config.project(containing: "/Users/g", home: "/Users/g")?.workspace.name == "Geral")
+        #expect(config.project(containing: "/Users/g/elsewhere", home: "/Users/g") == nil)
+        #expect(config.project(containing: "/Users/g/dev/apple", home: "/Users/g") == nil)
+    }
+}
+
 @Suite struct ConfigTests {
     @Test func roundTrips() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("ws-\(UUID()).json")

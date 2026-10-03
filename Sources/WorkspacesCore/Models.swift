@@ -153,3 +153,20 @@ public enum SessionStatus: String, Codable, Sendable {
         }
     }
 }
+
+public extension AppConfig {
+    /// The project a folder belongs to: the most specific one. A project that is the home folder
+    /// only claims the home folder itself, or every folder on the Mac would be in it.
+    func project(containing folder: String, home: String = NSHomeDirectory()) -> (workspace: Workspace, project: Project)? {
+        var best: (workspace: Workspace, project: Project, length: Int)?
+        let home = home.hasSuffix("/") ? String(home.dropLast()) : home
+        for workspace in workspaces {
+            for project in workspace.projects {
+                let path = project.path.count > 1 && project.path.hasSuffix("/") ? String(project.path.dropLast()) : project.path
+                let inside = folder == path || (path != home && folder.hasPrefix(path + "/"))
+                if inside, path.count > (best?.length ?? -1) { best = (workspace, project, path.count) }
+            }
+        }
+        return best.map { ($0.workspace, $0.project) }
+    }
+}

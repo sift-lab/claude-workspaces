@@ -11,6 +11,9 @@ if arguments.count > 1 {
     case "hook":
         HookSender.run()
         exit(0)
+    case "statusline":
+        StatusLineRelay.run()
+        exit(0)
     default:
         break
     }

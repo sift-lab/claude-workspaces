@@ -42,6 +42,8 @@ final class AppModel {
     @ObservationIgnored private var usageViewers = 0
     /// The app process itself, for the total on the usage screen.
     private(set) var appUsage: Usage = .zero
+    /// Tokens the sessions spend and the account's limit.
+    let tokens = TokenMonitor()
     @ObservationIgnored private var snapshotTimer: Timer?
     @ObservationIgnored private let store = ConfigStore()
     @ObservationIgnored private let helperPath: String
@@ -84,8 +86,10 @@ final class AppModel {
         }
         slowTimer?.tolerance = 5
         Notifier.shared.setUp { [weak self] sessionId in self?.focus(sessionId: sessionId) }
+        tokens.start(model: self)
         Orphans.reap(settingsPath: AppPaths.claudeSettingsFile.path)
         ScreenshotMode.start(model: self)
+        TokenShots.start(model: self)
     }
 
     func shutdown() {
@@ -402,6 +406,25 @@ final class AppModel {
         runtime.host.pid.map(usageMonitor.usage(ofTree:)) ?? .zero
     }
 
+    /// Screenshot mode only: sessions read from the transcripts become rows, never started.
+    /// Returns the first one added.
+    func addPreviewSessions(_ summaries: [SessionSummary]) -> SessionRuntime? {
+        var first: SessionRuntime?
+        var seen = Set(sessions.compactMap(\.claudeSessionId))
+        for summary in summaries where !seen.contains(summary.id) {
+            guard let cwd = summary.cwd, let (workspace, project) = config.project(containing: cwd) else { continue }
+            seen.insert(summary.id)
+            let runtime = SessionRuntime(id: UUID(), workspaceId: workspace.id, projectId: project.id,
+                                         label: summary.branch ?? project.name, worktree: nil)
+            runtime.claudeSessionId = summary.id
+            runtime.hasConversation = true
+            runtime.status = .idle
+            sessions.append(runtime)
+            if first == nil { first = runtime }
+        }
+        return first
+    }
+
     func isOnScreen(_ id: UUID) -> Bool { Set(visibleByWindow.values).contains(id) }
 
     private func hibernate(_ runtime: SessionRuntime) {
@@ -536,6 +559,16 @@ final class AppModel {
         case .tools:
             let enabled = WorkspaceTools.all.map(\.name).filter { !config.disabledTools.contains($0) }
             return IPCResponse(ok: true, text: "", enabledTools: enabled)
+        case .statusLine:
+            if let caller, let payload = request.payload {
+                let reading = StatusLineReading.parse(payload)
+                #if DEBUG
+                NSLog("status line from %@: context %@, five hour %@", caller.label, String(describing: reading.contextTokens),
+                      String(describing: reading.fiveHour?.percent))
+                #endif
+                tokens.receive(reading, from: caller)
+            }
+            return IPCResponse(ok: true, text: "")
         case .tool:
             let name = request.tool ?? ""
             if config.disabledTools.contains(name) {
@@ -652,7 +685,8 @@ final class AppModel {
         // The small hook binary starts in a few ms; the app binary is the fallback.
         let hook = URL(fileURLWithPath: helperPath).deletingLastPathComponent().appendingPathComponent("workspaces-hook").path
         let settings = FileManager.default.isExecutableFile(atPath: hook)
-            ? ClaudeLaunch.settingsJSON(hookCommand: ClaudeLaunch.shellQuote(hook))
+            ? ClaudeLaunch.settingsJSON(hookCommand: ClaudeLaunch.shellQuote(hook),
+                                        statusLineCommand: ClaudeLaunch.shellQuote(hook) + " statusline")
             : ClaudeLaunch.settingsJSON(helperPath: helperPath)
         try settings.encodedLine().write(to: AppPaths.claudeSettingsFile, options: .atomic)
         try ClaudeLaunch.mcpConfigJSON(helperPath: helperPath).encodedLine().write(to: AppPaths.mcpConfigFile, options: .atomic)

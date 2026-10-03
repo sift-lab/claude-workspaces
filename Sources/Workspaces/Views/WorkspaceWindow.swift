@@ -163,6 +163,7 @@ private struct Sidebar: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
+                TokenMark(session: session)
                 if session.sleep != .awake {
                     Image(systemName: "moon")
                         .font(.system(size: 9, weight: .medium))
@@ -281,6 +282,7 @@ private struct DetailToolbar: View {
                 .lineLimit(1)
                 if !session.isTerminal { StatusPill(session: session) }
                 if session.sleep != .awake { SleepTag(sleep: session.sleep) }
+                ContextMeter(session: session)
                 UsageBadge(session: session)
                 if session.status == .working, let activity = session.activity {
                     Text(activity).font(.system(size: 12)).foregroundStyle(Theme.secondary).lineLimit(1)
@@ -288,7 +290,7 @@ private struct DetailToolbar: View {
             }
             Spacer(minLength: 8)
             SegmentedSwitch(options: [("Uma", DetailMode.single), ("Grade", DetailMode.grid)], selection: $mode)
-            UsageButton()
+            LimitButton()
             NewTerminalMenu(workspaceId: workspaceId, selection: model.session(selection)) { id in
                 selectTerminal(id)
             }
@@ -368,23 +370,6 @@ struct UsageBadge: View {
         .font(.system(size: 11).monospacedDigit())
         .foregroundStyle(Theme.tertiary)
         .help("Memória e CPU do Claude e dos servidores MCP desta sessão")
-    }
-}
-
-private struct UsageButton: View {
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button { openWindow(id: "usage") } label: {
-            Image(systemName: "gauge.with.dots.needle.33percent")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Theme.support)
-                .frame(width: 28, height: 26)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Consumo das sessões")
-        .accessibilityLabel("Consumo das sessões")
     }
 }
 

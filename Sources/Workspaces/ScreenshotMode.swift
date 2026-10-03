@@ -137,3 +137,89 @@ enum ScreenshotMode {
         NSLog("screenshot: %@", url.path)
     }
 }
+
+/// `WORKSPACES_TOKEN_SHOTS=<dir>` photographs the token screens with this Mac's real transcripts.
+/// The sessions seen in the last hours become rows without starting any Claude, so it costs nothing.
+/// With `WORKSPACES_TOKEN_SHOTS_METER=1` the meter reads what the transcripts estimate, to show
+/// the screens as they look once the status line has reported.
+@MainActor
+enum TokenShots {
+    static var directory: String? { ProcessInfo.processInfo.environment["WORKSPACES_TOKEN_SHOTS"] }
+
+    static func start(model: AppModel) {
+        guard let directory else { return }
+        waitForData(model: model, directory: directory, tries: 0)
+    }
+
+    private static func waitForData(model: AppModel, directory: String, tries: Int) {
+        guard let overview = model.tokens.overview else {
+            if tries < 120 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { waitForData(model: model, directory: directory, tries: tries + 1) }
+            } else {
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        let first = model.addPreviewSessions(overview.windowSessions + overview.topSessions)
+        if ProcessInfo.processInfo.environment["WORKSPACES_TOKEN_SHOTS_METER"] == "1", let runtime = first {
+            model.tokens.previewMeter(from: runtime)
+        }
+        model.tokens.refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { shoot(model: model, directory: directory) }
+    }
+
+    private static func shoot(model: AppModel, directory: String) {
+        let hottest = model.sessions.max { (model.tokens.tokens($0)?.weightSinceFrom ?? 0) < (model.tokens.tokens($1)?.weightSinceFrom ?? 0) }
+        render(UsageShot(tab: .now), size: CGSize(width: 1180, height: 1180), name: "tokens-now", model: model, in: directory)
+        render(UsageShot(tab: .week), size: CGSize(width: 1180, height: 1240), name: "tokens-week", model: model, in: directory)
+        if let hottest {
+            render(ScrollView { SessionTokensDetail(session: hottest).padding(28) }, size: CGSize(width: 1180, height: 1000),
+                   name: "tokens-session", model: model, in: directory)
+            render(SessionTokensPopover(session: hottest, close: {}), size: CGSize(width: 384, height: 640),
+                   name: "tokens-popover", model: model, in: directory)
+            render(HStack(spacing: 12) { ContextMeter(session: hottest); LimitButton() }.padding(16),
+                   size: CGSize(width: 520, height: 60), name: "tokens-toolbar", model: model, in: directory)
+        }
+        render(MenuBarView(), size: CGSize(width: 320, height: 620), name: "tokens-menubar", model: model, in: directory)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+    }
+
+    /// The Consumo window on a given tab, without the window around it.
+    private struct UsageShot: View {
+        let tab: UsageTab
+
+        var body: some View {
+            ScrollView {
+                Group {
+                    switch tab {
+                    case .now: TokensNowView()
+                    case .week: TokensWeekView()
+                    case .machine: EmptyView()
+                    }
+                }
+                .padding(28)
+            }
+        }
+    }
+
+    private static func render<V: View>(_ view: V, size: CGSize, name: String, model: AppModel, in directory: String) {
+        let root = view.environment(model).preferredColorScheme(.dark)
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+            .background(Theme.background)
+        let host = NSHostingView(rootView: root)
+        host.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: CGRect(origin: CGPoint(x: -4000, y: -4000), size: size),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        host.layoutSubtreeIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+            host.cacheDisplay(in: host.bounds, to: rep)
+            let url = URL(fileURLWithPath: directory).appendingPathComponent("\(name).png")
+            try? rep.representation(using: .png, properties: [:])?.write(to: url)
+            NSLog("token shot: %@", url.path)
+            window.orderOut(nil)
+        }
+    }
+}

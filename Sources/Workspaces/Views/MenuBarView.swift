@@ -7,6 +7,10 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if model.tokens.fiveHourLimit != nil {
+                MenuBarLimitSection()
+                divider
+            }
             let waiting = model.sessionsNeedingYou
             if !waiting.isEmpty {
                 SectionLabel(text: "Esperando você")
@@ -53,7 +57,7 @@ struct MenuBarView: View {
             divider
 
             VStack(spacing: 0) {
-                Button { openWindow(id: "usage"); NSApp.activate(ignoringOtherApps: true) } label: {
+                Button { model.tokens.focused = nil; openWindow(id: "usage"); NSApp.activate(ignoringOtherApps: true) } label: {
                     menuItem("Consumo", shortcut: "")
                 }
                 .buttonStyle(RowButtonStyle())

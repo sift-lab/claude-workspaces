@@ -10,19 +10,24 @@ public enum ClaudeLaunch {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Settings passed with `--settings`: every subscribed hook calls `<helper> hook`.
+    /// Settings passed with `--settings`: every subscribed hook calls `<helper> hook`, and the status
+    /// line calls `<helper> statusline` (which still prints the person's own status line, if any).
     /// The user's own settings stay untouched.
     public static func settingsJSON(helperPath: String) -> JSONValue {
-        settingsJSON(hookCommand: shellQuote(helperPath) + " hook")
+        settingsJSON(hookCommand: shellQuote(helperPath) + " hook", statusLineCommand: shellQuote(helperPath) + " statusline")
     }
 
-    /// Same, with the exact command every hook runs.
-    public static func settingsJSON(hookCommand: String) -> JSONValue {
+    /// Same, with the exact commands the hooks and the status line run.
+    public static func settingsJSON(hookCommand: String, statusLineCommand: String? = nil) -> JSONValue {
         let command = JSONValue.string(hookCommand)
         let entry = JSONValue.array([.object(["hooks": .array([.object(["type": .string("command"), "command": command, "timeout": .number(5)])])])])
         var hooks: [String: JSONValue] = [:]
         for event in HookEvent.subscribed { hooks[event] = entry }
-        return .object(["hooks": .object(hooks)])
+        var settings: [String: JSONValue] = ["hooks": .object(hooks)]
+        if let statusLineCommand {
+            settings["statusLine"] = .object(["type": .string("command"), "command": .string(statusLineCommand), "padding": .number(0)])
+        }
+        return .object(settings)
     }
 
     public static let sessionHeader = "X-Workspaces-Session"

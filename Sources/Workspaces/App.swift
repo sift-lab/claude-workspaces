@@ -47,7 +47,7 @@ struct WorkspacesApp: App {
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 900, height: 640)
+        .defaultSize(width: 1180, height: 860)
 
         Settings {
             SettingsView()
@@ -60,21 +60,33 @@ struct WorkspacesApp: App {
                 .environment(model)
                 .preferredColorScheme(.dark)
         } label: {
-            MenuBarLabel(count: model.sessionsNeedingYou.count)
+            MenuBarLabel(count: model.sessionsNeedingYou.count, limit: menuBarLimit)
         }
         .menuBarExtraStyle(.window)
+    }
+
+    /// The 5 h window shows in the menu bar only when it matters: past 80%, or running out before it resets.
+    private var menuBarLimit: (text: String, alert: Bool)? {
+        guard let limit = model.tokens.fiveHourLimit, !limit.estimated else { return nil }
+        let alert = model.tokens.windowAtRisk
+        return alert || limit.used >= 80 ? (TokenFormat.percent(limit.used), alert) : nil
     }
 }
 
 private struct MenuBarLabel: View {
     let count: Int
+    let limit: (text: String, alert: Bool)?
 
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: "rectangle.stack")
             if count > 0 { Text("\(count)") }
+            if let limit {
+                if limit.alert { Image(systemName: "exclamationmark.triangle") }
+                Text(limit.text)
+            }
         }
-        .accessibilityLabel(count > 0 ? "Workspaces, \(count) esperando você" : "Workspaces")
+        .accessibilityLabel((count > 0 ? "Workspaces, \(count) esperando você" : "Workspaces") + (limit.map { ", janela de 5 horas em \($0.text)" } ?? ""))
     }
 }
 

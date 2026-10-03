@@ -30,7 +30,8 @@ The screenshots come from a demo workspace with made-up projects (`./scripts/scr
 - **Grid view.** See every session of a workspace at once, with the last lines of each terminal.
 - **MCP integration.** Every session gets a `workspaces` MCP server, so Claude can list sibling sessions, report what it is doing, open a new session, hand a message to another session, or ask for your attention.
 - **Sleep for idle sessions.** A session that is off screen, not waiting for you and not running a command is frozen (`SIGSTOP`, zero CPU, instant wake) and later hibernated (the process ends and the conversation resumes with `claude --resume` when you open it).
-- **Usage screen.** Memory and CPU of every session (Claude plus its MCP servers), totals, and how much hibernation freed.
+- **Tokens and the limit.** Next to each session's state, how much context it carries (and whether it is climbing fast or close to the ceiling); a popover shows the context through the day, each compaction, when the next one comes at the current pace, and the session's part of the 5 h window. The toolbar ring shows the 5 h window; the menu bar shows both windows of the account's limit with where they land at the current pace, and a notification comes when the 5 h window would run out before it resets.
+- **Usage screen.** "Agora": the 5 h window and the week with their projections, and every session's context, last-hour trend and share of the window. "Semana": spend per day and workspace, what weighs the most (rereading context, agents, models) and the heaviest sessions. A session opens in full: context and spend every 5 minutes, side by side, and the stretches between compactions. "Máquina": memory and CPU of every session (Claude plus its MCP servers), totals, and how much hibernation freed.
 - **Resume on relaunch.** Sessions reopen with their conversations when you open a workspace again.
 
 ## Requirements
@@ -61,6 +62,7 @@ open -a Workspaces --args --open "Work"
 - **No changes to your Claude Code setup.** Each session starts `claude` with `--settings` (hooks) and `--mcp-config` (the MCP server) pointing to files in `~/Library/Application Support/Workspaces/`. Your `~/.claude` settings are left untouched.
 - **Hooks** run a tiny helper (`workspaces-hook`, Foundation only) that forwards the event to the app over a unix socket. It never blocks Claude.
 - **MCP** is served by the app itself over HTTP on `127.0.0.1`, with a random token per launch, so no helper process runs per session.
+- **Tokens** are read from Claude Code's transcripts in `~/.claude/projects` (two weeks, each file from where the last read stopped; agents count toward the session that started them). The account's limit comes from the status line: the settings file sets `statusLine` to the hook helper, which tells the app what Claude Code reported (`context_window`, `rate_limits`) and then prints your own status line, if you have one. Weighing tokens by API price turns them into one number; readings of the meter calibrate how much of it fills each window.
 - **Launch.** The app reads your login shell environment once and then starts `claude` directly, so each session skips the cost of a login shell. Commands that need shell syntax fall back to the login shell.
 - **Crash safety.** On `SIGTERM` the app closes its sessions; on launch it ends orphaned sessions left by a crashed run (only processes that carry its own settings file).
 
@@ -96,7 +98,8 @@ App nativo para macOS que organiza as sessões do Claude Code por workspace: uma
 - Os hooks do Claude Code informam o estado de cada sessão; as que precisam de você ficam em destaque e podem notificar.
 - Cada sessão ganha um servidor MCP `workspaces` para ver as outras sessões, dizer o que está fazendo, abrir sessões, mandar recados e pedir atenção.
 - Sessões paradas e fora da tela congelam (CPU zero) e depois hibernam (o processo encerra e a conversa volta com `claude --resume` ao abrir).
-- A tela de Consumo mostra memória e CPU de cada sessão e o total.
+- Cada sessão mostra o contexto que carrega, se está subindo rápido ou perto do teto, quando compacta de novo e quanto gastou da janela de 5 h. A barra de menu e o anel da barra mostram a janela de 5 h e a semana com a projeção no ritmo atual, e um aviso chega quando a janela acaba antes de renovar.
+- A tela de Consumo tem três abas: Agora (janela, semana e cada sessão), Semana (gasto por dia, por workspace e o que mais pesa) e Máquina (memória e CPU). Uma sessão abre inteira, com o contexto e o gasto do dia lado a lado.
 - Nada muda na sua configuração do Claude Code: tudo vai por `--settings` e `--mcp-config`.
 
 Para instalar: `./scripts/build-app.sh --install` e abrir `~/Applications/Workspaces.app`. Precisa de macOS 14 ou mais novo, Claude Code instalado e Xcode 16 ou mais novo.
