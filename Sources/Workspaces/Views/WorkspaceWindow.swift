@@ -4,6 +4,33 @@ import WorkspacesCore
 
 enum DetailMode: Hashable { case single, grid }
 
+/// What a workspace window can open, for the ⌘T and ⇧⌘T menu items.
+struct WorkspaceActions {
+    var newSession: () -> Void
+    var newTerminal: () -> Void
+}
+
+/// Hands back the NSWindow a view lives in.
+private struct WindowReader: NSViewRepresentable {
+    let found: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView { Reader(found: found) }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    private final class Reader: NSView {
+        let found: (NSWindow) -> Void
+        init(found: @escaping (NSWindow) -> Void) {
+            self.found = found
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { found(window) }
+        }
+    }
+}
+
 struct WorkspaceWindow: View {
     let workspaceId: UUID
     @Environment(AppModel.self) private var model
@@ -49,6 +76,11 @@ struct WorkspaceWindow: View {
         .onChange(of: mode) { _, _ in reportVisible() }
         .onChange(of: model.requestedMode) { _, requested in if let requested { mode = requested } }
         .onDisappear { model.setVisible(window: windowToken, session: nil) }
+        // The terminal (an AppKit view) holds the keyboard focus, so SwiftUI's focused values never
+        // reach the menu; the window registers itself and the menu asks for the key window instead.
+        .background(WindowReader { window in
+            model.register(WorkspaceActions(newSession: openSession, newTerminal: openTerminal), for: window)
+        })
         .onChange(of: model.focusRequest?.session) { _, _ in
             guard let request = model.focusRequest, request.workspace == workspaceId else { return }
             selection = request.session
@@ -59,6 +91,27 @@ struct WorkspaceWindow: View {
 
     private func reportVisible() {
         model.setVisible(window: windowToken, session: mode == .single ? selection : nil)
+    }
+
+    /// The project of the session on screen, or the workspace's first project.
+    private var currentProject: UUID? {
+        model.session(selection)?.projectId ?? model.workspace(workspaceId)?.projects.first?.id
+    }
+
+    /// ⌘T: a new Claude session in the current project, shown right away.
+    private func openSession() {
+        guard let project = currentProject, let runtime = model.newSession(projectId: project) else { return }
+        selection = runtime.id
+        mode = .single
+    }
+
+    /// ⇧⌘T: a plain terminal where the shown session works (its worktree included), like the toolbar button.
+    private func openTerminal() {
+        guard let project = currentProject else { return }
+        let folder = model.session(selection).flatMap { $0.projectId == project ? $0.cwd : nil }
+        guard let runtime = model.newTerminal(projectId: project, folder: folder) else { return }
+        selection = runtime.id
+        mode = .single
     }
 
     private func preferredSelection() -> UUID? {

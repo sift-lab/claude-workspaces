@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
+        // Workspace windows have their own sessions; window tabs would also claim ⌘T.
+        NSWindow.allowsAutomaticWindowTabbing = false
         // A write to a pipe or socket whose reader is gone must fail with EPIPE instead of killing
         // the app and every session in it. A handler, unlike SIG_IGN, is reset by exec, so the
         // shells and Claude processes started from here keep the default.
@@ -98,9 +100,24 @@ private struct WorkspaceCommands: Commands {
     let model: AppModel
 
     var body: some Commands {
+        CommandGroup(after: .newItem) {
+            NewSessionItems(model: model)
+        }
         CommandMenu("Workspaces") {
             WorkspaceMenuItems(model: model)
         }
+    }
+}
+
+/// File menu: ⌘T and ⇧⌘T act on the workspace window in front.
+private struct NewSessionItems: View {
+    let model: AppModel
+
+    var body: some View {
+        Button("Nova sessão do Claude") { model.frontWindowActions?.newSession() }
+            .keyboardShortcut("t", modifiers: .command)
+        Button("Novo terminal") { model.frontWindowActions?.newTerminal() }
+            .keyboardShortcut("t", modifiers: [.command, .shift])
     }
 }
 

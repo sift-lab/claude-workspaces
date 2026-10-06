@@ -426,6 +426,29 @@ final class AppModel {
         return first
     }
 
+    // MARK: Front window actions (⌘T, ⇧⌘T)
+
+    /// Weak, so a closed window is released and its entry dropped.
+    private struct WindowEntry {
+        weak var window: NSWindow?
+        let actions: WorkspaceActions
+    }
+
+    @ObservationIgnored private var windowActions: [ObjectIdentifier: WindowEntry] = [:]
+
+    func register(_ actions: WorkspaceActions, for window: NSWindow) {
+        windowActions = windowActions.filter { $0.value.window != nil }
+        windowActions[ObjectIdentifier(window)] = WindowEntry(window: window, actions: actions)
+    }
+
+    /// The workspace window in front, or the last one used when another window (Consumo) is in front.
+    var frontWindowActions: WorkspaceActions? {
+        for candidate in [NSApp.keyWindow, NSApp.mainWindow] {
+            if let window = candidate, let entry = windowActions[ObjectIdentifier(window)], entry.window === window { return entry.actions }
+        }
+        return NSApp.orderedWindows.lazy.compactMap { self.windowActions[ObjectIdentifier($0)]?.actions }.first
+    }
+
     func isOnScreen(_ id: UUID) -> Bool { Set(visibleByWindow.values).contains(id) }
 
     private func hibernate(_ runtime: SessionRuntime) {
