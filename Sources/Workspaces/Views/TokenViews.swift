@@ -106,6 +106,8 @@ struct ContextTag: View {
                 .font(.system(size: 11, weight: level == .normal ? .regular : .semibold).monospacedDigit())
             if level != .normal { Text("passagem").font(.system(size: 11)) }
         }
+        // The session's name truncates; the mark never wraps.
+        .fixedSize()
         .foregroundStyle(level == .alarm ? Theme.alarm : (level == .needsHandoff ? Theme.primary : Theme.tertiary))
         .help(ContextText.help(context, limits))
         .accessibilityElement(children: .ignore)
@@ -166,6 +168,7 @@ struct ContextMeter: View {
                     }
                     if agents > 0, !asleep { AgentsLabel(count: agents) }
                 }
+                .fixedSize()
                 .foregroundStyle(level == .alarm ? Theme.alarm : (asleep ? Theme.tertiary : Theme.primary))
                 .padding(.leading, 8)
                 .padding(.trailing, 9)
