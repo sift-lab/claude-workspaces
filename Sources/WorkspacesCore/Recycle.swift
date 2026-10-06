@@ -304,6 +304,17 @@ public enum RecycleGate {
         return .success(sections.joined(separator: "\n\n"))
     }
 
+    /// close_session: never while the session works or waits, never with uncommitted changes.
+    /// A folder outside git has nothing to commit, so it may close.
+    public static func checkClose(status: SessionStatus, git: GitState) -> RecycleRefusal? {
+        if status == .working || status == .waiting { return .midTurn(status) }
+        switch git {
+        case .clean, .notRepository: return nil
+        case .dirty(let lines): return .dirtyTree(lines)
+        case .failed(let error): return .gitFailed(error)
+        }
+    }
+
     /// These tools take no free text: any argument besides the allowed ones is refused.
     public static func unexpectedArguments(_ arguments: JSONValue, allowed: Set<String>) -> [String] {
         guard case .object(let object) = arguments else { return arguments == .null ? [] : ["(argumentos)"] }

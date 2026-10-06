@@ -1,7 +1,7 @@
 import Foundation
 import WorkspacesCore
 
-/// Runs recycle_self and recycle_session: the gate, the log, "/clear", the new
+/// Runs recycle_self, recycle_session and close_session: the gate, the log, "/clear", the new
 /// conversation and the fixed message. Any step that could lose context refuses or stops instead,
 /// says why, and leaves the old conversation where it was.
 @MainActor
@@ -84,6 +84,33 @@ final class Recycler {
         case .success(let record):
             return ToolResult(text: "Registrado em recycles.jsonl e /clear enviado para \(label). A conversa anterior continua em \(record.oldTranscript ?? "?"). Quando a conversa nova começar, o app envia a mensagem fixa de retomada; acompanhe em list_sessions.")
         }
+    }
+
+    /// close_session: refused while the session works or waits, or with changes not committed. Logged first.
+    func close(_ target: SessionRuntime) -> ToolResult {
+        guard let model else { return ToolResult(text: "O app está encerrando.", isError: true) }
+        guard !isBusy(target) else { return ToolResult(text: "Recusado: há uma reciclagem em andamento nesta sessão.", isError: true) }
+        let folder = target.cwd ?? model.project(target.projectId)?.project.path
+        let worktree = folder.map { WorktreeFacts.read(cwd: $0) } ?? WorktreeFacts(git: .failed("pasta da sessão desconhecida"))
+        if let refusal = RecycleGate.checkClose(status: target.status, git: worktree.git) {
+            return ToolResult(text: refusal.message, isError: true)
+        }
+        let conversation = target.hasConversation ? target.claudeSessionId : nil
+        let transcript = conversation.flatMap { TranscriptLocator.find(conversation: $0, hint: target.transcriptPath, root: projectsRoot) }
+        let record = RecycleRecord(kind: .close, session: target.id.uuidString, label: model.displayLabel(target), cwd: folder,
+                                   frente: worktree.frenteText == nil ? nil : worktree.frentePath,
+                                   oldConversation: conversation, oldTranscript: transcript,
+                                   handoff: worktree.frenteText.flatMap(Handoff.section(in:)),
+                                   contextTokens: model.tokens.context(target))
+        do {
+            try log.append(record)
+        } catch {
+            return ToolResult(text: "Recusado: não consegui registrar em \(log.url.path) (\(error.localizedDescription)); nada foi fechado.", isError: true)
+        }
+        let label = model.displayLabel(target)
+        model.closeSession(target.id)
+        let kept = transcript.map { " A conversa continua em \($0)." } ?? ""
+        return ToolResult(text: "Fechei \(label) e registrei em recycles.jsonl.\(kept)")
     }
 
     private func basicRefusal(_ runtime: SessionRuntime) -> ToolResult? {

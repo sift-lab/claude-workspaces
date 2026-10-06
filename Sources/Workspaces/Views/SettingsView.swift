@@ -327,7 +327,7 @@ private struct ClaudePane: View {
         "open_session": ("Abrir outra sessão", "Num projeto do workspace, com branch ou worktree"),
         "send_message": ("Mandar recado", "Digita na caixa de outra sessão, sem enviar"),
         "notify": ("Pedir sua atenção", "Notificação com uma frase"),
-        "close_session": ("Fechar sessões", "Encerra uma sessão concluída do mesmo workspace"),
+        "close_session": ("Fechar sessões", "Encerra uma sessão parada do mesmo workspace, só sem mudança fora de commit"),
         "recycle_self": ("Recomeçar a própria conversa", "Depois da Passagem no FRENTE.md: registra, limpa e retoma pela passagem"),
         "recycle_session": ("Recomeçar outra sessão", "O mesmo, pedido por uma orquestradora, com a sessão parada"),
     ]

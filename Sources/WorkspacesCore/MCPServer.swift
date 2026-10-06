@@ -67,8 +67,8 @@ public enum WorkspaceTools {
         ),
         ToolDefinition(
             name: "close_session",
-            description: "Closes another session of the same workspace that has finished or is idle.",
-            inputSchema: schema(["session": ("string", "Session id (or its prefix) from list_sessions.")], required: ["session"])
+            description: "Closes another session of the same workspace that has finished or is idle. Refused while it is working or waiting, or while its worktree has changes not committed (git status shows anything modified or untracked). Logged in recycles.jsonl; the conversation's transcript stays on disk.",
+            inputSchema: schema(["session": ("string", "Session id (or its prefix) from list_sessions.")], required: ["session"], closed: true)
         ),
         ToolDefinition(
             name: "recycle_self",

@@ -14,7 +14,7 @@ struct ToolRunner {
         case "open_session": return openSession(args)
         case "send_message": return sendMessage(to: args["session"]?.stringValue, text: args["text"]?.stringValue)
         case "notify": return notify(args["text"]?.stringValue)
-        case "close_session": return closeSession(args["session"]?.stringValue)
+        case "close_session": return closeSession(args)
         case "recycle_self": return recycleSelf(args)
         case "recycle_session": return recycleSession(args)
         default: return ToolResult(text: "Ferramenta desconhecida: \(name)", isError: true)
@@ -136,25 +136,22 @@ struct ToolRunner {
         return text
     }
 
-    private func closeSession(_ reference: String?) -> ToolResult {
-        let found = target(reference)
-        guard case .found(let target) = found else {
-            if case .failure(let result) = found { return result }
-            return ToolResult(text: "Sessão não encontrada.", isError: true)
-        }
-        guard target.id != caller?.id else { return ToolResult(text: "Uma sessão não fecha a si mesma.", isError: true) }
-        guard [.done, .idle, .ended].contains(target.status) else {
-            return ToolResult(text: "\(target.label) ainda está \(target.status.label.lowercased()).", isError: true)
-        }
-        model.closeSession(target.id)
-        return ToolResult(text: "Closed \(target.label).")
-    }
-
     /// These tools never carry free text: any argument beyond the allowed ones is refused.
     private func refuseExtra(_ args: JSONValue, allowed: Set<String>) -> ToolResult? {
         let extra = RecycleGate.unexpectedArguments(args, allowed: allowed)
         guard !extra.isEmpty else { return nil }
         return ToolResult(text: "Recusado: esta ferramenta não aceita \(extra.joined(separator: ", ")); o texto enviado à sessão é sempre o fixo.", isError: true)
+    }
+
+    private func closeSession(_ args: JSONValue) -> ToolResult {
+        if let refusal = refuseExtra(args, allowed: ["session"]) { return refusal }
+        let session: SessionRuntime
+        switch target(args["session"]?.stringValue) {
+        case .failure(let result): return result
+        case .found(let runtime): session = runtime
+        }
+        guard session.id != caller?.id else { return ToolResult(text: "Uma sessão não fecha a si mesma.", isError: true) }
+        return model.recycler.close(session)
     }
 
     private func recycleSelf(_ args: JSONValue) -> ToolResult {

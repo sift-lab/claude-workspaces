@@ -105,6 +105,15 @@ private func refusal(_ result: Result<String, RecycleRefusal>) -> RecycleRefusal
         #expect(RecycleRefusal.dirtyTree([" M a.swift", "?? b"]).message.contains("M a.swift, ?? b"))
     }
 
+    @Test func closeRefusesWorkAndUncommittedChanges() {
+        #expect(RecycleGate.checkClose(status: .working, git: .clean) == .midTurn(.working))
+        #expect(RecycleGate.checkClose(status: .waiting, git: .clean) == .midTurn(.waiting))
+        #expect(RecycleGate.checkClose(status: .done, git: .dirty([" M a"])) == .dirtyTree([" M a"]))
+        #expect(RecycleGate.checkClose(status: .done, git: .failed("x")) == .gitFailed("x"))
+        #expect(RecycleGate.checkClose(status: .idle, git: .clean) == nil)
+        #expect(RecycleGate.checkClose(status: .ended, git: .notRepository) == nil)
+    }
+
     @Test func toolsTakeNoFreeText() {
         #expect(RecycleGate.unexpectedArguments(.object([:]), allowed: []).isEmpty)
         #expect(RecycleGate.unexpectedArguments(.null, allowed: []).isEmpty)
@@ -162,6 +171,7 @@ private func refusal(_ result: Result<String, RecycleRefusal>) -> RecycleRefusal
         #expect(recycleSelf?.inputSchema["additionalProperties"] == .bool(false))
         #expect(byName["recycle_session"]?.inputSchema["required"] == .array([.string("session")]))
         #expect(byName["recycle_session"]?.inputSchema["additionalProperties"] == .bool(false))
+        #expect(byName["close_session"]?.inputSchema["additionalProperties"] == .bool(false))
     }
 }
 
