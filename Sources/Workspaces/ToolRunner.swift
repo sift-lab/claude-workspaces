@@ -39,6 +39,7 @@ struct ToolRunner {
                     if let message = s.message, s.status == .waiting { line += " | \(message)" }
                     if s.sleep != .awake { line += " | \(s.sleep.rawValue), wakes when opened or messaged" }
                     else if s.host.isRunning { line += " | \(ByteFormat.short(model.currentUsage(s).memory))" }
+                    if !s.isTerminal, let context = model.tokens.context(s) { line += " | " + contextText(context) }
                     if s.id == caller?.id { line += " (this session)" }
                     lines.append(line)
                 }
@@ -118,6 +119,18 @@ struct ToolRunner {
         model.updateBadge()
         model.announceWaiting(caller, text: text ?? "")
         return ToolResult(text: "ok")
+    }
+
+    /// "contexto 412k", with the handoff and the alarm when they apply.
+    private func contextText(_ context: Int) -> String {
+        let limits = model.contextLimits
+        var text = "contexto \(ContextLimits.short(context))"
+        switch limits.level(context) {
+        case .normal: break
+        case .needsHandoff: text += " (precisa de passagem: acima de \(ContextLimits.short(limits.handoff)))"
+        case .alarm: text += " (precisa de passagem; alarme: acima de \(ContextLimits.short(limits.alarm)))"
+        }
+        return text
     }
 
     private func closeSession(_ reference: String?) -> ToolResult {

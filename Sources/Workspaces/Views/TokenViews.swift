@@ -7,6 +7,8 @@ import WorkspacesCore
 extension Theme {
     /// The only color in the app: the 5 h window runs out before it resets.
     static let warning = Color(red: 0.91, green: 0.64, blue: 0.24)
+    /// A session's context passed the alarm (500 mil): it needs its Passagem now.
+    static let alarm = Color(red: 0.93, green: 0.34, blue: 0.3)
     /// Greys for groups in a stacked chart, light to dark, told apart by lightness.
     static let groupGreys: [Color] = [Color(white: 0.9), Color(white: 0.6), Color(white: 0.4), Color(white: 0.28)]
 }
@@ -74,20 +76,53 @@ struct AgentsLabel: View {
     }
 }
 
-/// Sidebar row: only the exception gets a mark (rising fast, or near the ceiling).
+/// Sidebar row: the context the session carries. Past the limit it reads "passagem", in red past the alarm.
 struct TokenMark: View {
     let session: SessionRuntime
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let tokens = model.tokens
-        if session.sleep == .awake, tokens.risingFast(session) {
-            RisingArrow().help("O contexto subiu mais de 50 mil nos últimos 10 min")
-        } else if tokens.nearCeiling(session), let context = tokens.context(session) {
-            Text(TokenFormat.percent(Double(context) / Double(tokens.contextLimit(session)) * 100))
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(Theme.support)
-                .help("Contexto perto do teto: a próxima compactação está perto")
+        if !session.isTerminal, let context = tokens.context(session) {
+            ContextTag(context: context, limits: model.contextLimits,
+                       rising: session.sleep == .awake && tokens.risingFast(session))
+        }
+    }
+}
+
+/// "128k", or "412k passagem" past the limit.
+struct ContextTag: View {
+    let context: Int
+    let limits: ContextLimits
+    var rising = false
+
+    var body: some View {
+        let level = limits.level(context)
+        HStack(spacing: 4) {
+            if rising, level == .normal { RisingArrow() }
+            // Not by color alone: the alarm also gets a glyph.
+            if level == .alarm { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9)) }
+            Text(ContextLimits.short(context))
+                .font(.system(size: 11, weight: level == .normal ? .regular : .semibold).monospacedDigit())
+            if level != .normal { Text("passagem").font(.system(size: 11)) }
+        }
+        .foregroundStyle(level == .alarm ? Theme.alarm : (level == .needsHandoff ? Theme.primary : Theme.tertiary))
+        .help(ContextText.help(context, limits))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(ContextText.help(context, limits))
+    }
+}
+
+enum ContextText {
+    static func help(_ context: Int, _ limits: ContextLimits) -> String {
+        let base = "Contexto: \(TokenFormat.tokens(context))"
+        switch limits.level(context) {
+        case .normal:
+            return base + ". Pede passagem acima de \(TokenFormat.tokens(limits.handoff))."
+        case .needsHandoff:
+            return base + ", acima do limite de \(TokenFormat.tokens(limits.handoff)). Precisa de passagem: escrever a Passagem no FRENTE.md e chamar recycle_self."
+        case .alarm:
+            return base + ", acima do alarme de \(TokenFormat.tokens(limits.alarm)). Precisa de passagem agora: escrever a Passagem no FRENTE.md e chamar recycle_self."
         }
     }
 }
@@ -105,15 +140,25 @@ struct ContextMeter: View {
         if !session.isTerminal, let context = tokens.context(session) {
             let limit = tokens.contextLimit(session)
             let near = tokens.nearCeiling(session)
+            let level = model.contextLimits.level(context)
             let asleep = session.sleep != .awake
             let agents = tokens.tokens(session)?.activeAgents ?? 0
             Button { open.toggle() } label: {
                 HStack(spacing: 7) {
-                    FillBar(fraction: Double(context) / Double(limit), fill: asleep ? Theme.faint : Theme.primary)
+                    FillBar(fraction: Double(context) / Double(limit),
+                            fill: asleep ? Theme.faint : (level == .alarm ? Theme.alarm : Theme.primary))
                     Text(TokenFormat.tokens(context))
-                        .font(.system(size: 12, weight: near ? .semibold : .regular).monospacedDigit())
+                        .font(.system(size: 12, weight: near || level != .normal ? .semibold : .regular).monospacedDigit())
                     if asleep {
                         Image(systemName: "moon").font(.system(size: 9, weight: .medium))
+                    }
+                    if level == .alarm {
+                        Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10))
+                    }
+                    if level != .normal {
+                        Text("precisa de passagem").font(.system(size: 12))
+                    } else if asleep {
+                        EmptyView()
                     } else if near {
                         Text("compacta logo").font(.system(size: 12))
                     } else if tokens.risingFast(session) {
@@ -121,7 +166,7 @@ struct ContextMeter: View {
                     }
                     if agents > 0, !asleep { AgentsLabel(count: agents) }
                 }
-                .foregroundStyle(asleep ? Theme.tertiary : Theme.primary)
+                .foregroundStyle(level == .alarm ? Theme.alarm : (asleep ? Theme.tertiary : Theme.primary))
                 .padding(.leading, 8)
                 .padding(.trailing, 9)
                 .frame(height: 24)
@@ -129,7 +174,7 @@ struct ContextMeter: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .help("Contexto desta sessão: \(TokenFormat.tokens(context)) de \(TokenFormat.tokens(limit))")
+            .help("Contexto desta sessão: \(TokenFormat.tokens(context)) de \(TokenFormat.tokens(limit)). " + ContextText.help(context, model.contextLimits))
             .accessibilityLabel("Contexto da sessão: \(TokenFormat.tokens(context)) de \(TokenFormat.tokens(limit))")
             .popover(isPresented: $open, arrowEdge: .bottom) {
                 SessionTokensPopover(session: session, close: { open = false })

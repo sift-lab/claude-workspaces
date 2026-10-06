@@ -76,6 +76,7 @@ final class TokenMonitor {
         let now = Date()
         if let id = reading.sessionId ?? runtime.claudeSessionId, let tokens = reading.contextTokens, tokens > 0 {
             exact[id] = ExactContext(tokens: tokens, size: reading.contextSize, at: now)
+            model?.checkContextAlarms()
         }
         var changed = false
         if let r = reading.fiveHour {
@@ -182,6 +183,7 @@ final class TokenMonitor {
         if weekFull != full7 { weekFull = full7 }
         busy = false
         checkAlert()
+        model?.checkContextAlarms()
         if again {
             again = false
             refresh()

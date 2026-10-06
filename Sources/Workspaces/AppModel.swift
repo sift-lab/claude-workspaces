@@ -665,6 +665,24 @@ final class AppModel {
         if runtime.status != before { updateKeepAwake() }
     }
 
+    var contextLimits: ContextLimits { config.contextLimits }
+
+    /// Above 500 mil: one notification per conversation, and the mark turns red. The model is never
+    /// switched and nothing is compacted on purpose: compaction summarizes and loses detail.
+    func checkContextAlarms() {
+        let limits = contextLimits
+        for runtime in sessions where !runtime.isTerminal {
+            guard let conversation = runtime.claudeSessionId, runtime.alarmedConversation != conversation,
+                  let context = tokens.context(runtime), limits.level(context) == .alarm else { continue }
+            runtime.alarmedConversation = conversation
+            let projectName = project(runtime.projectId)?.project.name ?? ""
+            Notifier.shared.post(
+                title: "\(displayLabel(runtime)) passou de \(TokenFormat.tokens(limits.alarm)) de contexto",
+                body: "\(projectName): contexto em \(TokenFormat.tokens(context)). A sessão precisa escrever a Passagem no FRENTE.md e chamar recycle_self.",
+                sessionId: runtime.id)
+        }
+    }
+
     func announceWaiting(_ runtime: SessionRuntime, text: String? = nil) {
         guard config.notifyWhenWaiting, !NSApp.isActive || text != nil else { return }
         let projectName = project(runtime.projectId)?.project.name ?? ""

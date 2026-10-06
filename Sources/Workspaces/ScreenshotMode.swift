@@ -165,7 +165,17 @@ enum TokenShots {
             model.tokens.previewMeter(from: runtime)
         }
         model.tokens.refresh()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { shoot(model: model, directory: directory) }
+        waitForSessions(model: model, directory: directory, tries: 0)
+    }
+
+    /// The rows read their context from the second pass over the transcripts; on a busy Mac it
+    /// takes longer than a fixed delay, so wait for it (up to a minute).
+    private static func waitForSessions(model: AppModel, directory: String, tries: Int) {
+        if model.tokens.sessions.isEmpty, tries < 60 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { waitForSessions(model: model, directory: directory, tries: tries + 1) }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { shoot(model: model, directory: directory) }
     }
 
     private static func shoot(model: AppModel, directory: String) {
@@ -181,7 +191,35 @@ enum TokenShots {
                    size: CGSize(width: 520, height: 60), name: "tokens-toolbar", model: model, in: directory)
         }
         render(MenuBarView(), size: CGSize(width: 320, height: 620), name: "tokens-menubar", model: model, in: directory)
+        render(SidebarShot(), size: CGSize(width: 260, height: 520), name: "tokens-sidebar", model: model, in: directory)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+    }
+
+    /// Sidebar rows of the sessions read from the transcripts, the heaviest context first, with the
+    /// mark each one gets (context, "passagem" past the limit, red past the alarm).
+    private struct SidebarShot: View {
+        @Environment(AppModel.self) private var model
+
+        var body: some View {
+            let rows = model.sessions.sorted { (model.tokens.context($0) ?? 0) > (model.tokens.context($1) ?? 0) }.prefix(16)
+            VStack(alignment: .leading, spacing: 2) {
+                SectionLabel(text: "Sessões").padding(.horizontal, 10).padding(.vertical, 8)
+                ForEach(Array(rows)) { session in
+                    HStack(spacing: 8) {
+                        StatusGlyph(status: session.status, attention: session.attention, terminal: session.isTerminal)
+                        Text(model.displayLabel(session)).font(.system(size: 13)).foregroundStyle(Theme.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        TokenMark(session: session)
+                    }
+                    .padding(.leading, 18)
+                    .padding(.trailing, 10)
+                    .frame(height: 28)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Theme.sidebar)
+        }
     }
 
     /// The Consumo window on a given tab, without the window around it.

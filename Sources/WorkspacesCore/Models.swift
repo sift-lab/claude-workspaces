@@ -102,12 +102,15 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var freezeAfterMinutes: Int
     /// Minutes before it is hibernated (process ended, resumed on open); 0 turns it off.
     public var hibernateAfterMinutes: Int
+    /// Context (tokens) above which a session "precisa de passagem".
+    public var handoffContextTokens: Int
 
     public static let defaultDisabledTools = ["close_session"]
 
     public init(workspaces: [Workspace] = [], notifyWhenWaiting: Bool = true, reopenSessions: Bool = true,
                 disabledTools: [String] = AppConfig.defaultDisabledTools, claudeCommand: String = "claude",
-                freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30) {
+                freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30,
+                handoffContextTokens: Int = ContextLimits.defaultHandoff) {
         self.workspaces = workspaces
         self.notifyWhenWaiting = notifyWhenWaiting
         self.reopenSessions = reopenSessions
@@ -115,7 +118,10 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.claudeCommand = claudeCommand
         self.freezeAfterMinutes = freezeAfterMinutes
         self.hibernateAfterMinutes = hibernateAfterMinutes
+        self.handoffContextTokens = handoffContextTokens
     }
+
+    public var contextLimits: ContextLimits { ContextLimits(handoff: handoffContextTokens) }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -126,6 +132,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         claudeCommand = try c.decodeIfPresent(String.self, forKey: .claudeCommand) ?? "claude"
         freezeAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .freezeAfterMinutes) ?? 2
         hibernateAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateAfterMinutes) ?? 30
+        handoffContextTokens = try c.decodeIfPresent(Int.self, forKey: .handoffContextTokens) ?? ContextLimits.defaultHandoff
     }
 }
 

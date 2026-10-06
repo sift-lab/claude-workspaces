@@ -37,6 +37,8 @@ final class SessionRuntime: Identifiable {
     var usage: Usage = .zero
     /// What the session held when it went to hibernate: what hibernating gave back.
     var freedByHibernation: UInt64 = 0
+    /// The conversation the 500 mil alarm already went off for.
+    @ObservationIgnored var alarmedConversation: String?
 
     @ObservationIgnored let host = TerminalHost()
 
@@ -62,3 +64,4 @@ final class SessionRuntime: Identifiable {
 
     var shortId: String { String(id.uuidString.lowercased().prefix(8)) }
 }
+
