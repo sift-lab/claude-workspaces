@@ -576,10 +576,12 @@ final class AppModel {
         switch request.kind {
         case .hook:
             // A hook from a process that was already replaced (a hibernated one exiting late) is dropped.
+            // The reply's text, when not empty, is JSON the hook prints for Claude Code.
+            var output = ""
             if let caller, let payload = request.payload, request.launch.flatMap(Int.init) ?? caller.launch == caller.launch {
-                applyHook(payload, to: caller)
+                output = applyHook(payload, to: caller) ?? ""
             }
-            return IPCResponse(ok: true, text: "")
+            return IPCResponse(ok: true, text: output)
         case .tools:
             let enabled = WorkspaceTools.all.map(\.name).filter { !config.disabledTools.contains($0) }
             return IPCResponse(ok: true, text: "", enabledTools: enabled)
@@ -635,8 +637,10 @@ final class AppModel {
         return true
     }
 
-    private func applyHook(_ payload: JSONValue, to runtime: SessionRuntime) {
-        guard let update = HookEvent.update(from: payload) else { return }
+    /// Applies a hook and returns what the hook should print for Claude Code, if anything.
+    private func applyHook(_ payload: JSONValue, to runtime: SessionRuntime) -> String? {
+        guard let update = HookEvent.update(from: payload) else { return nil }
+        if let path = update.transcriptPath { runtime.transcriptPath = path }
         if update.status == .idle, let text = pendingPaste.removeValue(forKey: runtime.id) {
             // SessionStart comes a moment before the prompt accepts input.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak runtime] in runtime?.host.paste(text) }
@@ -663,9 +667,27 @@ final class AppModel {
         if runtime.status == .waiting, before != .waiting { announceWaiting(runtime) }
         updateBadge()
         if runtime.status != before { updateKeepAwake() }
+
+        var output: String?
+        switch update.event {
+        case "PostToolUse", "UserPromptSubmit":
+            output = handoffReminder(runtime, event: update.event)
+        default:
+            break
+        }
+        return output
     }
 
     var contextLimits: ContextLimits { config.contextLimits }
+
+    /// Above the limit, the session is told to write its Passagem: once on crossing, then every 50 mil.
+    private func handoffReminder(_ runtime: SessionRuntime, event: String) -> String? {
+        guard !runtime.isTerminal, let conversation = runtime.claudeSessionId else { return nil }
+        var last = runtime.handoffReminder?.conversation == conversation ? runtime.handoffReminder?.tokens : nil
+        let text = contextLimits.reminder(tokens: tokens.context(runtime), lastWarned: &last)
+        runtime.handoffReminder = (conversation, last)
+        return text.map { HookOutput.additionalContext(event: event, $0) }
+    }
 
     /// Above 500 mil: one notification per conversation, and the mark turns red. The model is never
     /// switched and nothing is compacted on purpose: compaction summarizes and loses detail.

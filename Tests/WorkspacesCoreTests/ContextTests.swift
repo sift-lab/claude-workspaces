@@ -59,3 +59,56 @@ import Testing
         #expect(back.handoffContextTokens == 250_000)
     }
 }
+
+@Suite struct HookOutputTests {
+    @Test func additionalContextShape() throws {
+        // hookEventName must be the event that fired, or Claude Code ignores the context.
+        for event in ["PostToolUse", "UserPromptSubmit", "SessionStart"] {
+            let line = HookOutput.additionalContext(event: event, "Contexto em 412k")
+            #expect(!line.contains("\n"))
+            let json = try #require(JSONValue.parse(Data(line.utf8)))
+            #expect(json["hookSpecificOutput"]?["hookEventName"] == .string(event))
+            #expect(json["hookSpecificOutput"]?["additionalContext"] == .string("Contexto em 412k"))
+        }
+    }
+
+    @Test func helperPrintsOnlyJSONObjectsTheAppSent() {
+        let json = HookOutput.additionalContext(event: "SessionStart", "x")
+        #expect(HookReply.stdout(IPCResponse(ok: true, text: json)) == json + "\n")
+        #expect(HookReply.stdout(IPCResponse(ok: true, text: "")) == nil)
+        #expect(HookReply.stdout(IPCResponse(ok: false, text: "app encerrando")) == nil)
+        #expect(HookReply.stdout(IPCResponse(ok: true, text: "texto solto")) == nil)
+        #expect(HookReply.stdout(IPCResponse(ok: true, text: "{quebrado}")) == nil)
+        #expect(HookReply.stdout(nil) == nil)
+    }
+
+    @Test func sessionStartCarriesSourceAndTranscript() {
+        let update = HookEvent.update(from: .object(["hook_event_name": .string("SessionStart"), "session_id": .string("new"),
+                                                     "source": .string("clear"), "transcript_path": .string("/t/new.jsonl")]))
+        #expect(update?.event == "SessionStart")
+        #expect(update?.source == "clear")
+        #expect(update?.transcriptPath == "/t/new.jsonl")
+        #expect(update?.status == .idle)
+    }
+
+    @Test func clearDoesNotEndTheSession() {
+        func end(_ reason: String?) -> SessionStatus? {
+            var o: [String: JSONValue] = ["hook_event_name": .string("SessionEnd")]
+            if let reason { o["reason"] = .string(reason) }
+            return HookEvent.update(from: .object(o))?.status
+        }
+        #expect(end("clear") == nil)
+        #expect(end("resume") == nil)
+        #expect(end("other") == .ended)
+        #expect(end("prompt_input_exit") == .ended)
+        #expect(end(nil) == .ended)
+    }
+
+    @Test func sessionStartHookRunsForEverySourceIncludingClear() {
+        // No matcher: the same hook fires on startup, resume, clear and compact.
+        let settings = ClaudeLaunch.settingsJSON(hookCommand: "'/x/workspaces-hook'")
+        guard case .array(let entries)? = settings["hooks"]?["SessionStart"] else { Issue.record("no SessionStart"); return }
+        #expect(entries.count == 1)
+        #expect(entries.first?["matcher"] == nil)
+    }
+}

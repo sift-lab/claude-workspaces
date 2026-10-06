@@ -37,6 +37,10 @@ final class SessionRuntime: Identifiable {
     var usage: Usage = .zero
     /// What the session held when it went to hibernate: what hibernating gave back.
     var freedByHibernation: UInt64 = 0
+    /// The conversation's .jsonl, from the hooks.
+    @ObservationIgnored var transcriptPath: String?
+    /// Context at the last "escreva a Passagem" reminder, per conversation.
+    @ObservationIgnored var handoffReminder: (conversation: String, tokens: Int?)?
     /// The conversation the 500 mil alarm already went off for.
     @ObservationIgnored var alarmedConversation: String?
 
