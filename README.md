@@ -33,6 +33,7 @@ The screenshots come from a demo workspace with made-up projects (`./scripts/scr
 - **Tokens and the limit.** Next to each session's state, how much context it carries (and whether it is climbing fast or close to the ceiling); a popover shows the context through the day, each compaction, when the next one comes at the current pace, and the session's part of the 5 h window. The toolbar ring shows the 5 h window; the menu bar shows both windows of the account's limit with where they land at the current pace, and a notification comes when the 5 h window would run out before it resets.
 - **Usage screen.** "Agora": the 5 h window and the week with their projections, and every session's context, last-hour trend and share of the window. "Semana": spend per day and workspace, what weighs the most (rereading context, agents, models) and the heaviest sessions. A session opens in full: context and spend every 5 minutes, side by side, and the stretches between compactions. "Máquina": memory and CPU of every session (Claude plus its MCP servers), totals, and how much hibernation freed.
 - **Resume on relaunch.** Sessions reopen with their conversations when you open a workspace again.
+- **One item, one session.** Long-lived conversations reread their whole context on every call. Past a limit you set (300 thousand tokens by default) a session is marked "precisa de passagem" and is reminded to write a handoff; `recycle_self` then starts it over in a clean conversation that picks up from that handoff, behind locks that refuse whenever context could be lost (see [Recycling a session](#recycling-a-session)).
 
 ## Requirements
 
@@ -75,13 +76,39 @@ open -a Workspaces --args --open "Work"
 | `open_session` | Opens a new session in a project, optionally in a new worktree and with a first prompt. |
 | `send_message` | Types a message into another session's prompt without sending it. Wakes it if asleep. |
 | `notify` | Sends a macOS notification asking for your attention. |
-| `close_session` | Closes a finished session of the same workspace. Off by default. |
+| `close_session` | Closes a finished session of the same workspace. Refused while it works or waits, or with changes not committed in its worktree; logged in `recycles.jsonl`. Off by default. |
+| `recycle_self` | Starts the calling session over in a clean conversation once its turn ends, after it wrote its handoff. No arguments. |
+| `recycle_session` | The same for another session of the workspace, for an orchestrating session. Only the session id. |
 
 Each tool can be turned off in Settings. Claude Code asks for permission the first time a session uses each one.
 
+`list_sessions` shows each session's context ("contexto 412k") and flags the ones past the limit.
+
+### Recycling a session
+
+The rule is one item, one session: when an item's PR is open (or the context passes the limit), the session writes a section whose title starts with "Passagem" in the `FRENTE.md` at the root of its worktree (the item in progress with branch, commit and PR, what is left, queued jobs, next items, decisions, pitfalls, watchers left on), commits, and calls `recycle_self`. The app then:
+
+1. **Checks the locks**, and refuses with the reason when any fails:
+   - `FRENTE.md` exists at the root of the session's git worktree, has a non-empty section titled "Passagem...", and was saved in the last 30 minutes;
+   - `git status --porcelain` shows nothing modified and nothing untracked outside the ignore (the `FRENTE.md` itself is ignored);
+   - the session is not in the middle of a turn (working or waiting for you). `recycle_self` is always called from inside a turn, so it is scheduled and every lock is checked again when the turn ends (the Stop hook) and Claude Code has settled;
+   - the current conversation's `.jsonl` is on disk;
+   - Claude Code's input line is seen empty on screen, so `/clear` never goes out together with a draft or a message another session typed.
+2. **Logs before clearing**: one line in `~/Library/Application Support/Workspaces/recycles.jsonl` with the time, folder, old conversation id, old `.jsonl` path and a copy of the Passagem. If the line cannot be written, nothing is cleared. Nothing is ever deleted: the old `.jsonl` stays where Claude Code wrote it.
+3. **Sends `/clear`** with Enter and waits up to 30 s for the new conversation (a new session id from the `SessionStart` hook with source `clear`, or from the status line). The `SessionStart` hook answers with `hookSpecificOutput.additionalContext`: the Passagem copied in the log and the old transcript's path.
+4. **Sends a fixed message** with Enter, where only the path changes: "Leia a seção Passagem do FRENTE.md e retome. A conversa anterior está em <path>: se faltar algo, procure nela com grep, sem ler inteira." It waits up to 30 s for the `UserPromptSubmit` hook and logs the new conversation id.
+
+None of these tools accepts free text: extra arguments are refused, and the only things typed are `/clear` and the fixed message. A failure after the log is logged too (`failed`), shown in `list_sessions` and the sidebar, and sent to you as a notification.
+
+While a session is past the limit, the `PostToolUse` and `UserPromptSubmit` hooks add a reminder to its context (`additionalContext`) once on crossing and again every 50 thousand tokens: "Contexto em 412k, acima do limite de 300k: no próximo ponto seguro, escreva a Passagem no FRENTE.md e chame recycle_self." Past 500 thousand you get a macOS notification and the mark turns red. The app never switches the model to a smaller window and never forces a compaction: compaction summarizes on its own and loses detail.
+
+The hook output follows Claude Code's documented format (`hookSpecificOutput` with `hookEventName` and `additionalContext`, see [Hooks](https://code.claude.com/docs/en/hooks)); the helper only ever prints a JSON object the app sent, never plain text.
+
 ### Configuration
 
-Settings live in `~/Library/Application Support/Workspaces/workspaces.json` and can be edited in the app. Per project you can set where new sessions open, how many open with the workspace, and extra `claude` arguments (for example `--add-dir ../api`). Freeze and hibernate delays are in Settings, under "Economia".
+Settings live in `~/Library/Application Support/Workspaces/workspaces.json` and can be edited in the app. Per project you can set where new sessions open, how many open with the workspace, and extra `claude` arguments (for example `--add-dir ../api`). Freeze and hibernate delays are in Settings, under "Economia"; the context above which a session needs its handoff (`handoffContextTokens`, 300 thousand by default) is under "Contexto".
+
+To look at the screens without touching an installed app that hosts your sessions, run the built binary with its own support folder: `WORKSPACES_HOME=$(mktemp -d) WORKSPACES_TOKEN_SHOTS=<folder> build/Workspaces.app/Contents/MacOS/Workspaces` renders the token screens (sidebar marks included) from this Mac's transcripts and quits.
 
 ## Project layout
 
@@ -100,6 +127,7 @@ App nativo para macOS que organiza as sessões do Claude Code por workspace: uma
 - Sessões paradas e fora da tela congelam (CPU zero) e depois hibernam (o processo encerra e a conversa volta com `claude --resume` ao abrir).
 - Cada sessão mostra o contexto que carrega, se está subindo rápido ou perto do teto, quando compacta de novo e quanto gastou da janela de 5 h. A barra de menu e o anel da barra mostram a janela de 5 h e a semana com a projeção no ritmo atual, e um aviso chega quando a janela acaba antes de renovar.
 - A tela de Consumo tem três abas: Agora (janela, semana e cada sessão), Semana (gasto por dia, por workspace e o que mais pesa) e Máquina (memória e CPU). Uma sessão abre inteira, com o contexto e o gasto do dia lado a lado.
+- Um item, uma sessão: acima de um limite de contexto (300 mil por padrão, nos Ajustes) a sessão aparece como "precisa de passagem" e recebe um aviso a cada 50 mil. Ela escreve a seção Passagem no FRENTE.md da raiz da worktree, faz commit e chama `recycle_self`. O app confere as travas (passagem salva nos últimos 30 min, git status limpo, sessão parada, caixa de entrada vazia), registra tudo em `recycles.jsonl` antes de limpar, envia `/clear` e depois uma mensagem fixa que manda ler a passagem e aponta o .jsonl da conversa anterior. Nada é apagado. `recycle_session` faz o mesmo a pedido de uma orquestradora; `close_session` recusa sessão trabalhando ou com mudança sem commit. Acima de 500 mil chega uma notificação e a marca fica vermelha; o app nunca troca o modelo nem força compactação.
 - Nada muda na sua configuração do Claude Code: tudo vai por `--settings` e `--mcp-config`.
 
 Para instalar: `./scripts/build-app.sh --install` e abrir `~/Applications/Workspaces.app`. Precisa de macOS 14 ou mais novo, Claude Code instalado e Xcode 16 ou mais novo.
