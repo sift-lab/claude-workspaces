@@ -17,16 +17,19 @@ public struct ToolResult: Equatable, Sendable {
 }
 
 public enum WorkspaceTools {
-    private static func schema(_ properties: [String: (String, String)], required: [String] = []) -> JSONValue {
+    /// `closed` forbids properties beyond the listed ones (the tools that must never carry free text).
+    private static func schema(_ properties: [String: (String, String)], required: [String] = [], closed: Bool = false) -> JSONValue {
         var props: [String: JSONValue] = [:]
         for (name, (type, description)) in properties {
             props[name] = .object(["type": .string(type), "description": .string(description)])
         }
-        return .object([
+        var schema: [String: JSONValue] = [
             "type": .string("object"),
             "properties": .object(props),
             "required": .array(required.map { .string($0) }),
-        ])
+        ]
+        if closed { schema["additionalProperties"] = .bool(false) }
+        return .object(schema)
     }
 
     public static let all: [ToolDefinition] = [
@@ -67,6 +70,16 @@ public enum WorkspaceTools {
             description: "Closes another session of the same workspace that has finished or is idle.",
             inputSchema: schema(["session": ("string", "Session id (or its prefix) from list_sessions.")], required: ["session"])
         ),
+        ToolDefinition(
+            name: "recycle_self",
+            description: "Starts this session over in a clean conversation without losing what matters, when the item's PR is open or the context passed the limit. First write the handoff: a section whose title starts with \"Passagem\" in the FRENTE.md at the root of this session's worktree (the item in progress with branch, commit and PR, what is left, queued jobs, next items, decisions, pitfalls, watchers left on). Commit everything. Then call this and end your turn. Refused unless FRENTE.md was saved in the last 30 minutes and git status is clean. When the turn ends, the app checks again, logs the Passagem and the old transcript path in recycles.jsonl, sends /clear and then a fixed message telling the new conversation to read the Passagem. Takes no arguments.",
+            inputSchema: schema([:], closed: true)
+        ),
+        ToolDefinition(
+            name: "recycle_session",
+            description: "Same as recycle_self, for another session of this workspace (an orchestrating session uses it). Refused while that session is in the middle of a turn, has text typed in its prompt, has no fresh Passagem in its FRENTE.md, or has changes not committed. Takes only the session id; never any text.",
+            inputSchema: schema(["session": ("string", "Session id (or its prefix) from list_sessions.")], required: ["session"], closed: true)
+        ),
     ]
 }
 
@@ -99,7 +112,7 @@ public final class MCPServer {
                 "protocolVersion": .string(version),
                 "capabilities": .object(["tools": .object([:])]),
                 "serverInfo": .object(["name": .string("workspaces"), "version": .string("0.1.0")]),
-                "instructions": .string("This session runs inside the Workspaces app, next to other Claude Code sessions. Use set_status at the start of long steps; use list_sessions to see sibling sessions."),
+                "instructions": .string("This session runs inside the Workspaces app, next to other Claude Code sessions. Use set_status at the start of long steps; use list_sessions to see sibling sessions. In projects that keep a FRENTE.md, when an item's PR is open or the context passes the limit, write its Passagem section, commit, and call recycle_self."),
             ]))
         case "ping":
             return result(id, .object([:]))

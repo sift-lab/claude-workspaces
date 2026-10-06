@@ -21,6 +21,8 @@ public enum AppPaths {
     }
     public static var claudeSettingsFile: URL { supportDirectory.appendingPathComponent("claude-settings.json") }
     public static var mcpConfigFile: URL { supportDirectory.appendingPathComponent("claude-mcp.json") }
+    /// Every recycle and close_session, one JSON line each, never rewritten.
+    public static var recycleLogFile: URL { supportDirectory.appendingPathComponent("recycles.jsonl") }
 
     public static func ensureSupportDirectory() throws {
         try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)

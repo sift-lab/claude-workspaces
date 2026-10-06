@@ -15,6 +15,8 @@ struct ToolRunner {
         case "send_message": return sendMessage(to: args["session"]?.stringValue, text: args["text"]?.stringValue)
         case "notify": return notify(args["text"]?.stringValue)
         case "close_session": return closeSession(args["session"]?.stringValue)
+        case "recycle_self": return recycleSelf(args)
+        case "recycle_session": return recycleSession(args)
         default: return ToolResult(text: "Ferramenta desconhecida: \(name)", isError: true)
         }
     }
@@ -40,6 +42,7 @@ struct ToolRunner {
                     if s.sleep != .awake { line += " | \(s.sleep.rawValue), wakes when opened or messaged" }
                     else if s.host.isRunning { line += " | \(ByteFormat.short(model.currentUsage(s).memory))" }
                     if !s.isTerminal, let context = model.tokens.context(s) { line += " | " + contextText(context) }
+                    if let recycle = s.recycle { line += " | \(recycle.text)" }
                     if s.id == caller?.id { line += " (this session)" }
                     lines.append(line)
                 }
@@ -145,5 +148,31 @@ struct ToolRunner {
         }
         model.closeSession(target.id)
         return ToolResult(text: "Closed \(target.label).")
+    }
+
+    /// These tools never carry free text: any argument beyond the allowed ones is refused.
+    private func refuseExtra(_ args: JSONValue, allowed: Set<String>) -> ToolResult? {
+        let extra = RecycleGate.unexpectedArguments(args, allowed: allowed)
+        guard !extra.isEmpty else { return nil }
+        return ToolResult(text: "Recusado: esta ferramenta não aceita \(extra.joined(separator: ", ")); o texto enviado à sessão é sempre o fixo.", isError: true)
+    }
+
+    private func recycleSelf(_ args: JSONValue) -> ToolResult {
+        if let refusal = refuseExtra(args, allowed: []) { return refusal }
+        guard let caller else { return noCaller }
+        return model.recycler.requestSelf(caller)
+    }
+
+    private func recycleSession(_ args: JSONValue) -> ToolResult {
+        if let refusal = refuseExtra(args, allowed: ["session"]) { return refusal }
+        let session: SessionRuntime
+        switch target(args["session"]?.stringValue) {
+        case .failure(let result): return result
+        case .found(let runtime): session = runtime
+        }
+        guard session.id != caller?.id else {
+            return ToolResult(text: "Esta é a própria sessão: use recycle_self, que espera o turno terminar.", isError: true)
+        }
+        return model.recycler.requestSession(session)
     }
 }

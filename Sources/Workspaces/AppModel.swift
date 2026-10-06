@@ -45,6 +45,8 @@ final class AppModel {
     private(set) var appUsage: Usage = .zero
     /// Tokens the sessions spend and the account's limit.
     let tokens = TokenMonitor()
+    /// recycle_self, recycle_session and close_session. Set at the end of init.
+    @ObservationIgnored private(set) var recycler: Recycler!
     @ObservationIgnored private var snapshotTimer: Timer?
     @ObservationIgnored private let store = ConfigStore()
     @ObservationIgnored private let helperPath: String
@@ -87,6 +89,7 @@ final class AppModel {
         }
         slowTimer?.tolerance = 5
         Notifier.shared.setUp { [weak self] sessionId in self?.focus(sessionId: sessionId) }
+        recycler = Recycler(model: self)
         tokens.start(model: self)
         Orphans.reap(settingsPath: AppPaths.claudeSettingsFile.path)
         ScreenshotMode.start(model: self)
@@ -533,6 +536,7 @@ final class AppModel {
 
     func closeSession(_ id: UUID) {
         guard let runtime = session(id) else { return }
+        recycler.forget(id)
         runtime.sleep = .awake
         runtime.host.terminate()
         pendingPaste[id] = nil
@@ -593,6 +597,7 @@ final class AppModel {
                       String(describing: reading.fiveHour?.percent))
                 #endif
                 tokens.receive(reading, from: caller)
+                recycler.statusLine(reading, runtime: caller)
             }
             return IPCResponse(ok: true, text: "")
         case .tool:
@@ -637,6 +642,9 @@ final class AppModel {
         return true
     }
 
+    /// A recado typed only once a hibernated session is back.
+    func hasPendingPaste(_ id: UUID) -> Bool { pendingPaste[id] != nil }
+
     /// Applies a hook and returns what the hook should print for Claude Code, if anything.
     private func applyHook(_ payload: JSONValue, to runtime: SessionRuntime) -> String? {
         guard let update = HookEvent.update(from: payload) else { return nil }
@@ -670,11 +678,14 @@ final class AppModel {
 
         var output: String?
         switch update.event {
+        case "SessionStart" where update.source == "clear":
+            output = recycler.sessionStartContext(for: runtime)
         case "PostToolUse", "UserPromptSubmit":
             output = handoffReminder(runtime, event: update.event)
         default:
             break
         }
+        recycler.hook(update, runtime: runtime)
         return output
     }
 
@@ -682,7 +693,7 @@ final class AppModel {
 
     /// Above the limit, the session is told to write its Passagem: once on crossing, then every 50 mil.
     private func handoffReminder(_ runtime: SessionRuntime, event: String) -> String? {
-        guard !runtime.isTerminal, let conversation = runtime.claudeSessionId else { return nil }
+        guard !runtime.isTerminal, let conversation = runtime.claudeSessionId, !recycler.isBusy(runtime) else { return nil }
         var last = runtime.handoffReminder?.conversation == conversation ? runtime.handoffReminder?.tokens : nil
         let text = contextLimits.reminder(tokens: tokens.context(runtime), lastWarned: &last)
         runtime.handoffReminder = (conversation, last)

@@ -43,6 +43,8 @@ final class SessionRuntime: Identifiable {
     @ObservationIgnored var handoffReminder: (conversation: String, tokens: Int?)?
     /// The conversation the 500 mil alarm already went off for.
     @ObservationIgnored var alarmedConversation: String?
+    /// Where a recycle (recycle_self or recycle_session) stands.
+    var recycle: RecycleState?
 
     @ObservationIgnored let host = TerminalHost()
 
@@ -61,6 +63,7 @@ final class SessionRuntime: Identifiable {
     var detail: String {
         if sleep != .awake { return sleep == .frozen ? "Congelada, volta na hora ao abrir" : "Hibernando, retoma ao abrir" }
         if isTerminal { return status == .ended ? "Terminal encerrado" : "Terminal" }
+        if let recycle, recycle.inProgress || recycle.isFailure { return recycle.text }
         if status == .waiting, let message { return message }
         if status == .working, let activity { return activity }
         return status.label
@@ -69,3 +72,36 @@ final class SessionRuntime: Identifiable {
     var shortId: String { String(id.uuidString.lowercased().prefix(8)) }
 }
 
+/// A recycle as the sidebar and list_sessions tell it.
+enum RecycleState: Equatable {
+    /// recycle_self: waits for the turn to end.
+    case scheduled
+    /// recycle_session on a hibernated session: waits for it to start.
+    case waking
+    /// "/clear" was sent; waits for the new conversation.
+    case clearing
+    /// The fixed message was typed; waits for it to be sent.
+    case resuming
+    case done(Date)
+    case failed(String)
+
+    var inProgress: Bool {
+        switch self {
+        case .scheduled, .waking, .clearing, .resuming: return true
+        case .done, .failed: return false
+        }
+    }
+
+    var isFailure: Bool { if case .failed = self { return true } else { return false } }
+
+    var text: String {
+        switch self {
+        case .scheduled: return "Reciclagem agendada para o fim do turno"
+        case .waking: return "Reciclagem: acordando a sessão"
+        case .clearing: return "Reciclagem: /clear enviado, esperando a conversa nova"
+        case .resuming: return "Reciclagem: mensagem de retomada enviada"
+        case .done(let date): return "Reciclada às \(date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)))"
+        case .failed(let reason): return "Reciclagem não feita: \(reason)"
+        }
+    }
+}

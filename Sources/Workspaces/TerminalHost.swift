@@ -101,6 +101,16 @@ final class TerminalHost: NSObject, LocalProcessTerminalViewDelegate {
         view.send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
     }
 
+    /// Types text as the keyboard would, for a slash command. Only the recycle uses it, with fixed text.
+    func type(_ text: String) {
+        view.send(txt: text)
+    }
+
+    /// Enter: sends what is in the prompt. Only the recycle uses it, after its own fixed text.
+    func pressReturn() {
+        view.send(txt: "\r")
+    }
+
     /// Writes to the screen only, not to the process.
     func show(_ text: String) {
         view.feed(text: text)

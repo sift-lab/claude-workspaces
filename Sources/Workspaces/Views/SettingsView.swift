@@ -328,6 +328,8 @@ private struct ClaudePane: View {
         "send_message": ("Mandar recado", "Digita na caixa de outra sessão, sem enviar"),
         "notify": ("Pedir sua atenção", "Notificação com uma frase"),
         "close_session": ("Fechar sessões", "Encerra uma sessão concluída do mesmo workspace"),
+        "recycle_self": ("Recomeçar a própria conversa", "Depois da Passagem no FRENTE.md: registra, limpa e retoma pela passagem"),
+        "recycle_session": ("Recomeçar outra sessão", "O mesmo, pedido por uma orquestradora, com a sessão parada"),
     ]
 
     var body: some View {
