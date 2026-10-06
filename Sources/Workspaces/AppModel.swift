@@ -37,6 +37,7 @@ final class AppModel {
     @ObservationIgnored private var visibleByWindow: [UUID: UUID] = [:]
     @ObservationIgnored private var gridViewers = 0
     @ObservationIgnored private var slowTimer: Timer?
+    @ObservationIgnored private let keepAwake = KeepAwake()
     @ObservationIgnored private var usageTimer: Timer?
     @ObservationIgnored private let usageMonitor = UsageMonitor()
     @ObservationIgnored private var usageViewers = 0
@@ -638,6 +639,7 @@ final class AppModel {
         persist(runtime)
         if runtime.status == .waiting, before != .waiting { announceWaiting(runtime) }
         updateBadge()
+        if runtime.status != before { updateKeepAwake() }
     }
 
     func announceWaiting(_ runtime: SessionRuntime, text: String? = nil) {
@@ -656,6 +658,16 @@ final class AppModel {
     private func slowTick() {
         now = Date()
         applySleepPolicy()
+        updateKeepAwake()
+    }
+
+    private func updateKeepAwake() {
+        let working = sessions.filter { !$0.isTerminal && $0.host.isRunning && $0.sleep == .awake && $0.status == .working }
+        let facts = working.map { runtime in
+            KeepAwakePolicy.Session(status: runtime.status, quietFor: Date().timeIntervalSince(runtime.lastChange),
+                                    runningCommand: runtime.host.pid.map(ProcessTree.runsShell(under:)) ?? false)
+        }
+        keepAwake.hold(KeepAwakePolicy().holds(facts))
     }
 
     // MARK: Files

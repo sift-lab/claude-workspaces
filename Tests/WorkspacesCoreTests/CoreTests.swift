@@ -307,6 +307,30 @@ import Testing
     }
 }
 
+@Suite struct KeepAwakePolicyTests {
+    let policy = KeepAwakePolicy(staleAfter: 30 * 60)
+
+    private func session(_ status: SessionStatus = .working, quiet minutes: Double = 1, running: Bool = false) -> KeepAwakePolicy.Session {
+        .init(status: status, quietFor: minutes * 60, runningCommand: running)
+    }
+
+    @Test func holdsWhileAnySessionWorks() {
+        #expect(policy.holds([session()]))
+        #expect(policy.holds([session(.done), session(.idle), session()]))
+    }
+
+    @Test func releasesWhenNothingWorks() {
+        #expect(!policy.holds([]))
+        #expect(!policy.holds([session(.done), session(.idle), session(.waiting), session(.ended)]))
+        #expect(!policy.holds([session(.done, running: true)]))
+    }
+
+    @Test func staleWorkingHoldsOnlyWithACommandUnderIt() {
+        #expect(!policy.holds([session(quiet: 31)]))
+        #expect(policy.holds([session(quiet: 31, running: true)]))
+    }
+}
+
 @Suite struct ShellSupportTests {
     @Test func splitsPlainWordsAndQuotes() {
         #expect(ShellSupport.words("claude") == ["claude"])
