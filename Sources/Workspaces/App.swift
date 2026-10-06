@@ -7,6 +7,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
+        // A write to a pipe or socket whose reader is gone must fail with EPIPE instead of killing
+        // the app and every session in it. A handler, unlike SIG_IGN, is reset by exec, so the
+        // shells and Claude processes started from here keep the default.
+        signal(SIGPIPE) { _ in }
         // A `kill` or a logout skips applicationWillTerminate; without this the sessions outlive the app.
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)
