@@ -199,10 +199,55 @@ private func refusal(_ result: Result<String, RecycleRefusal>) -> RecycleRefusal
     }
 
     @Test func noInputLineIsUnknown() {
-        #expect(PromptScreen.inputIsEmpty([]) == nil)
+        #expect(PromptScreen.inputIsEmpty([ScreenLine]()) == nil)
         #expect(PromptScreen.inputIsEmpty(["❯ "]) == nil)
         #expect(PromptScreen.inputIsEmpty(["Do you want to proceed?", "1. Yes", "2. No"]) == nil)
         #expect(PromptScreen.inputIsEmpty([rule, ">>> python"]) == nil)
+    }
+
+    // Claude Code 2.1.292 suggests the next prompt after a turn, drawn faint (SGR 2) in the
+    // input line, where its placeholder goes. With its own drawn cursor, the first character is
+    // inverse instead of faint.
+
+    private func cells(_ text: String, faint: Bool = false, inverse: Bool = false) -> [ScreenCell] {
+        text.map { ScreenCell($0, faint: faint, inverse: inverse) }
+    }
+
+    private func screen(_ input: [ScreenCell]) -> [ScreenLine] {
+        [ScreenLine("⏺ Feito."), ScreenLine(rule), ScreenLine(cells: input), ScreenLine("────────"),
+         ScreenLine("  ⏸ manual mode on")]
+    }
+
+    @Test func faintSuggestionIsEmpty() {
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ ") + cells("rode os testes de novo", faint: true))) == true)
+        // The drawn cursor on its first character.
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ ") + cells("r", inverse: true)
+                                                 + cells("ode os testes de novo", faint: true))) == true)
+        // Inside a box.
+        let boxed = cells("│ > ") + cells("Leia o FRENTE.md", faint: true) + cells("        │")
+        #expect(PromptScreen.inputIsEmpty([ScreenLine("╭────╮"), ScreenLine(cells: boxed), ScreenLine("╰────╯")]) == true)
+    }
+
+    @Test func plainTextIsADraft() {
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ rascunho que não pode ir junto"))) == false)
+        // Typed text under the cursor, with the cursor at its start.
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ ") + cells("r", inverse: true) + cells("ascunho"))) == false)
+        // A one-letter draft under the cursor: nothing faint follows it.
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ ") + cells("r", inverse: true))) == false)
+    }
+
+    @Test func draftNextToFaintTextIsADraft() {
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ rascunho ") + cells("rode os testes", faint: true))) == false)
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ ") + cells("rode os testes", faint: true) + cells(" rascunho"))) == false)
+        #expect(PromptScreen.inputIsEmpty(screen(cells("❯ ") + cells("r", inverse: true) + cells("ode", faint: true)
+                                                 + cells(" rascunho"))) == false)
+    }
+
+    @Test func faintTextWithoutTheInputLineIsUnknown() {
+        // No prompt mark under the rule.
+        #expect(PromptScreen.inputIsEmpty(screen(cells("rode os testes de novo", faint: true))) == nil)
+        // The mark, but no rule above it.
+        #expect(PromptScreen.inputIsEmpty([ScreenLine("⏺ Feito."), ScreenLine(cells: cells("❯ ") + cells("rode", faint: true))]) == nil)
     }
 }
 

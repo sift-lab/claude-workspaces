@@ -297,10 +297,10 @@ final class Recycler {
         let conversation = runtime.hasConversation ? runtime.claudeSessionId : nil
         let transcript = conversation.flatMap { TranscriptLocator.find(conversation: $0, hint: runtime.transcriptPath, root: projectsRoot) }
         let awake = runtime.host.isRunning && runtime.sleep == .awake
-        let screen = awake ? runtime.host.snapshot(lines: 400) : []
+        let screen = awake ? runtime.host.screen(lines: 400) : []
         let prompt = awake ? PromptScreen.inputIsEmpty(screen) : nil
         #if DEBUG
-        if prompt != true { NSLog("recycle: input line not seen empty; bottom of screen:\n%@", screen.suffix(12).joined(separator: "\n")) }
+        if prompt != true { NSLog("recycle: input line not seen empty; bottom of screen:\n%@", screen.suffix(12).map(\.text).joined(separator: "\n")) }
         #endif
         return RecycleFacts(worktree: worktree, status: runtime.status, conversation: conversation, transcript: transcript,
                             promptEmpty: prompt)

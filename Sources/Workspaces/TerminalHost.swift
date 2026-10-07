@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import SwiftTerm
+import WorkspacesCore
 
 /// Owns one session's terminal view and the process running in it. Lives as long as the session,
 /// so switching sessions or closing the window never kills the process.
@@ -144,14 +145,33 @@ final class TerminalHost: NSObject, LocalProcessTerminalViewDelegate {
         let terminal = view.getTerminal()
         var lines: [String] = []
         for row in 0..<terminal.rows {
-            // Claude positions text with cursor moves, leaving empty cells; they are spaces on screen.
-            let line = terminal.getLine(row: row)?.translateToString(trimRight: true, characterProvider: { cell in
-                let ch = cell.getCharacter()
-                return ch == "\u{0}" ? " " : ch
-            }) ?? ""
+            let line = terminal.getLine(row: row)?.translateToString(trimRight: true, characterProvider: Self.character) ?? ""
             if !line.trimmingCharacters(in: .whitespaces).isEmpty { lines.append(line) }
         }
         return Array(lines.suffix(count))
+    }
+
+    /// The same lines cell by cell, with what the recycle's input check reads: faint and inverse.
+    func screen(lines count: Int) -> [ScreenLine] {
+        let terminal = view.getTerminal()
+        var lines: [ScreenLine] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else { continue }
+            let cells = (0..<min(line.count, line.getTrimmedLength())).map { column -> ScreenCell in
+                let cell = line[column]
+                let style = cell.attribute.style
+                return ScreenCell(Self.character(cell), faint: style.contains(.dim), inverse: style.contains(.inverse))
+            }
+            let screenLine = ScreenLine(cells: cells)
+            if !screenLine.text.trimmingCharacters(in: .whitespaces).isEmpty { lines.append(screenLine) }
+        }
+        return Array(lines.suffix(count))
+    }
+
+    /// Claude positions text with cursor moves, leaving empty cells; they are spaces on screen.
+    private static func character(_ cell: CharData) -> Character {
+        let ch = cell.getCharacter()
+        return ch == "\u{0}" ? " " : ch
     }
 
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
