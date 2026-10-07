@@ -25,6 +25,17 @@ public enum AppPaths {
     public static var recycleLogFile: URL { supportDirectory.appendingPathComponent("recycles.jsonl") }
     /// Every change of the conversation a session resumes, one JSON line each.
     public static var conversationLogFile: URL { supportDirectory.appendingPathComponent("conversations.jsonl") }
+    /// The self-update: the staged build, its log, the backup of the previous app and the heartbeat.
+    public static var updateDirectory: URL { supportDirectory.appendingPathComponent("update", isDirectory: true) }
+    /// The git worktree the update is built in, never the one being developed. Caches, without the
+    /// space of "Application Support" in its path; next to the support folder when that is overridden.
+    public static var updateWorktree: URL {
+        if ProcessInfo.processInfo.environment["WORKSPACES_HOME"] != nil {
+            return supportDirectory.appendingPathComponent("update-wt", isDirectory: true)
+        }
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return caches.appendingPathComponent("Workspaces/update-wt", isDirectory: true)
+    }
 
     public static func ensureSupportDirectory() throws {
         try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
