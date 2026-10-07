@@ -6,6 +6,7 @@ enum DetailMode: Hashable { case single, grid }
 
 /// What a workspace window can open, for the ⌘T and ⇧⌘T menu items.
 struct WorkspaceActions {
+    var workspaceId: UUID
     var newSession: () -> Void
     var newTerminal: () -> Void
 }
@@ -79,7 +80,7 @@ struct WorkspaceWindow: View {
         // The terminal (an AppKit view) holds the keyboard focus, so SwiftUI's focused values never
         // reach the menu; the window registers itself and the menu asks for the key window instead.
         .background(WindowReader { window in
-            model.register(WorkspaceActions(newSession: openSession, newTerminal: openTerminal), for: window)
+            model.register(WorkspaceActions(workspaceId: workspaceId, newSession: openSession, newTerminal: openTerminal), for: window)
         })
         .onChange(of: model.focusRequest?.session) { _, _ in
             guard let request = model.focusRequest, request.workspace == workspaceId else { return }

@@ -47,6 +47,10 @@ final class AppModel {
     let tokens = TokenMonitor()
     /// recycle_self, recycle_session and close_session. Set at the end of init.
     @ObservationIgnored private(set) var recycler: Recycler!
+    /// "Procurar atualizações…" and the silent checks. Started once the app finished launching.
+    @ObservationIgnored private(set) var updater: Updater!
+    /// Workspaces whose windows were open before an update restarted the app.
+    @ObservationIgnored private var pendingReopen: [UUID] = []
     @ObservationIgnored private var snapshotTimer: Timer?
     @ObservationIgnored private let store = ConfigStore()
     @ObservationIgnored private let helperPath: String
@@ -90,6 +94,8 @@ final class AppModel {
         slowTimer?.tolerance = 5
         Notifier.shared.setUp { [weak self] sessionId in self?.focus(sessionId: sessionId) }
         recycler = Recycler(model: self)
+        updater = Updater(model: self)
+        pendingReopen = Self.takeReopenList()
         tokens.start(model: self)
         Orphans.reap(settingsPath: AppPaths.claudeSettingsFile.path)
         ScreenshotMode.start(model: self)
@@ -145,9 +151,57 @@ final class AppModel {
     }()
 
     func takePendingOpen() -> UUID? {
-        guard let name = pendingOpen?.lowercased() else { return nil }
-        pendingOpen = nil
-        return config.workspaces.first { $0.name.lowercased() == name }?.id
+        if let name = pendingOpen?.lowercased() {
+            pendingOpen = nil
+            return config.workspaces.first { $0.name.lowercased() == name }?.id
+        }
+        guard !pendingReopen.isEmpty else { return nil }
+        return pendingReopen.removeFirst()
+    }
+
+    // MARK: Update
+
+    /// The login shell's environment for git and the build, or the app's own until it is known.
+    var toolEnvironment: [String: String] { loginEnvironment ?? ProcessInfo.processInfo.environment }
+
+    /// Sessions a restart would interrupt now.
+    var busySessions: (working: Int, waiting: Int) {
+        let live = sessions.filter { !$0.isTerminal && $0.host.isRunning }
+        return (live.filter { $0.status == .working }.count, live.filter { $0.status == .waiting }.count)
+    }
+
+    /// Workspaces with a window open, reopened after an update.
+    var openWorkspaceIds: [UUID] {
+        var seen = Set<UUID>()
+        return windowActions.values.compactMap { entry in
+            guard let window = entry.window, window.isVisible, seen.insert(entry.actions.workspaceId).inserted else { return nil }
+            return entry.actions.workspaceId
+        }
+    }
+
+    /// Where an update dialog goes as a sheet: the workspace window in front, or any visible one.
+    var presentationWindow: NSWindow? {
+        if let key = NSApp.keyWindow, windowActions[ObjectIdentifier(key)] != nil, key.attachedSheet == nil { return key }
+        return windowActions.values.compactMap(\.window).first { $0.isVisible && $0.attachedSheet == nil }
+    }
+
+    /// After an update the windows usually come back with macOS's window restoration; the ones that
+    /// did not are opened here, a moment after the first window, so a restored one is not doubled.
+    func reopenAfterUpdate() {
+        guard !pendingReopen.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            let missing = self.pendingReopen.filter { !self.startedWorkspaces.contains($0) && self.workspace($0) != nil }
+            self.pendingReopen = []
+            for id in missing { self.openWindow?(id: "workspace", value: id) }
+        }
+    }
+
+    private static func takeReopenList() -> [UUID] {
+        let url = UpdatePaths().reopen
+        guard let data = FileManager.default.contents(atPath: url.path) else { return [] }
+        try? FileManager.default.removeItem(at: url)
+        return (try? JSONDecoder().decode([UUID].self, from: data)) ?? []
     }
 
     // MARK: Workspaces and projects

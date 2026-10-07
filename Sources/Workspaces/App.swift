@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.resume()
             signalSources.append(source)
         }
+        // Says the app came up (an update waits for it) and starts the update checks.
+        MainActor.assumeIsolated { AppModel.shared.updater.start() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -100,6 +102,9 @@ private struct WorkspaceCommands: Commands {
     let model: AppModel
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Procurar atualizações…") { model.updater.check(manual: true) }
+        }
         CommandGroup(after: .newItem) {
             NewSessionItems(model: model)
         }
@@ -158,6 +163,7 @@ private struct RootWindow: View {
             model.openWindow = openWindow
             model.openSettings = openSettings
             if current == nil, let id = model.takePendingOpen() { choose(id) }
+            model.reopenAfterUpdate()
         }
     }
 
