@@ -1,9 +1,12 @@
 #!/bin/zsh
 # Builds Workspaces.app in build/. With --install, copies it to ~/Applications.
+# WORKSPACES_BUILD_JOBS limits the compile jobs (the app's own update build uses 2).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-swift build -c release
+JOBS=()
+[[ -n "${WORKSPACES_BUILD_JOBS:-}" ]] && JOBS=(-j "$WORKSPACES_BUILD_JOBS")
+swift build -c release "${JOBS[@]}"
 BIN="$(swift build -c release --show-bin-path)"
 APP=build/Workspaces.app
 
@@ -38,6 +41,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# The commit and the repository the app updates itself from. In a worktree (the app's own update
+# build) the repository is the main checkout, which WORKSPACES_REPOSITORY can also name.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  REPO="${WORKSPACES_REPOSITORY:-$(cd "$(git rev-parse --git-common-dir)/.." && pwd)}"
+  DIRTY=false
+  [[ -n "$(git status --porcelain --untracked-files=no)" ]] && DIRTY=true
+  PLIST_FILE="$APP/Contents/Info.plist"
+  plutil -replace CFBundleVersion -string "$(git rev-list --count HEAD)" "$PLIST_FILE"
+  plutil -insert WorkspacesCommit -string "$(git rev-parse HEAD)" "$PLIST_FILE"
+  plutil -insert WorkspacesRepository -string "$REPO" "$PLIST_FILE"
+  plutil -insert WorkspacesDirty -bool "$DIRTY" "$PLIST_FILE"
+fi
 
 # Privacy grants (Full Disk Access, Automation) are keyed to the signing identity.
 # An ad-hoc signature changes on every build and drops them, so prefer a real certificate.
