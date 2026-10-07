@@ -9,6 +9,7 @@ let arguments = CommandLine.arguments.dropFirst()
 if arguments.first == "statusline" {
     StatusLineRelay.run()
 } else if arguments.first == "apply-update" {
+    #if os(macOS)
     guard let path = arguments.dropFirst().first, let data = FileManager.default.contents(atPath: path),
           let plan = try? JSONDecoder().decode(UpdatePlan.self, from: data) else {
         FileHandle.standardError.write(Data("apply-update: plano ilegível\n".utf8))
@@ -16,6 +17,12 @@ if arguments.first == "statusline" {
     }
     let outcome = UpdateInstaller(plan: plan, env: .live(logFile: plan.paths.applyLog)).run()
     exit(outcome == .installed ? 0 : 1)
+    #else
+    FileHandle.standardError.write(Data("apply-update: só no macOS\n".utf8))
+    exit(2)
+    #endif
+} else if arguments.first == "tool" {
+    exit(ToolCommand.run(Array(arguments.dropFirst())))
 } else if let session = ProcessInfo.processInfo.environment[ClaudeLaunch.sessionEnvKey] {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     let payload = JSONValue.parse(data) ?? .null

@@ -4,6 +4,12 @@ public struct ToolDefinition: Sendable {
     public var name: String
     public var description: String
     public var inputSchema: JSONValue
+
+    public init(name: String, description: String, inputSchema: JSONValue) {
+        self.name = name
+        self.description = description
+        self.inputSchema = inputSchema
+    }
 }
 
 public struct ToolResult: Equatable, Sendable {
@@ -18,7 +24,7 @@ public struct ToolResult: Equatable, Sendable {
 
 public enum WorkspaceTools {
     /// `closed` forbids properties beyond the listed ones (the tools that must never carry free text).
-    private static func schema(_ properties: [String: (String, String)], required: [String] = [], closed: Bool = false) -> JSONValue {
+    public static func schema(_ properties: [String: (String, String)], required: [String] = [], closed: Bool = false) -> JSONValue {
         var props: [String: JSONValue] = [:]
         for (name, (type, description)) in properties {
             props[name] = .object(["type": .string(type), "description": .string(description)])
@@ -87,15 +93,23 @@ public enum WorkspaceTools {
 public final class MCPServer {
     public static let supportedVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
+    public static let appInstructions = "This session runs inside the Workspaces app, next to other Claude Code sessions. Use set_status at the start of long steps; use list_sessions to see sibling sessions. In projects that keep a FRENTE.md, when an item's PR is open or the context passes the limit, write its Passagem section, commit, and call recycle_self."
+
     private let enabledTools: () -> [String]?
     private let callTool: (String, JSONValue) -> ToolResult
+    private let tools: [ToolDefinition]
+    private let instructions: String
 
     /// - Parameters:
     ///   - enabledTools: names the app allows now, or nil when the app is unreachable (all are listed).
     ///   - callTool: runs a tool.
-    public init(enabledTools: @escaping () -> [String]?, callTool: @escaping (String, JSONValue) -> ToolResult) {
+    ///   - tools: the tools offered; the server daemon has its own descriptions.
+    public init(enabledTools: @escaping () -> [String]?, callTool: @escaping (String, JSONValue) -> ToolResult,
+                tools: [ToolDefinition] = WorkspaceTools.all, instructions: String = MCPServer.appInstructions) {
         self.enabledTools = enabledTools
         self.callTool = callTool
+        self.tools = tools
+        self.instructions = instructions
     }
 
     /// Handles one JSON-RPC message. Returns nil for notifications.
@@ -112,13 +126,13 @@ public final class MCPServer {
                 "protocolVersion": .string(version),
                 "capabilities": .object(["tools": .object([:])]),
                 "serverInfo": .object(["name": .string("workspaces"), "version": .string("0.1.0")]),
-                "instructions": .string("This session runs inside the Workspaces app, next to other Claude Code sessions. Use set_status at the start of long steps; use list_sessions to see sibling sessions. In projects that keep a FRENTE.md, when an item's PR is open or the context passes the limit, write its Passagem section, commit, and call recycle_self."),
+                "instructions": .string(instructions),
             ]))
         case "ping":
             return result(id, .object([:]))
         case "tools/list":
             let enabled = enabledTools()
-            let tools = WorkspaceTools.all
+            let tools = self.tools
                 .filter { enabled?.contains($0.name) ?? true }
                 .map { JSONValue.object(["name": .string($0.name), "description": .string($0.description), "inputSchema": $0.inputSchema]) }
             return result(id, .object(["tools": .array(tools)]))
@@ -126,7 +140,7 @@ public final class MCPServer {
             guard let name = params["name"]?.stringValue else {
                 return error(id, code: -32602, message: "missing tool name")
             }
-            guard WorkspaceTools.all.contains(where: { $0.name == name }) else {
+            guard tools.contains(where: { $0.name == name }) else {
                 return error(id, code: -32602, message: "unknown tool: \(name)")
             }
             let outcome = callTool(name, params["arguments"] ?? .object([:]))

@@ -102,18 +102,7 @@ final class TokenMonitor {
 
     /// Keeps only readings that changed something; returns true when the reading is the newest.
     private func record(_ reading: MeterReading, in list: inout [MeterReading]) -> Bool {
-        if let last = list.last {
-            guard reading.time >= last.time else { return false }
-            if last.percent == reading.percent, abs(last.resetsAt.timeIntervalSince(reading.resetsAt)) < 60 {
-                list[list.count - 1].time = reading.time
-                return true
-            }
-        }
-        list.append(reading)
-        let cutoff = Date().addingTimeInterval(-Self.horizon)
-        list.removeAll { $0.time < cutoff }
-        if list.count > 3000 { list.removeFirst(list.count - 3000) }
-        return true
+        LimitReadings.record(reading, in: &list)
     }
 
     /// Screenshot mode only: a meter reading equal to what the transcripts estimate.
@@ -335,26 +324,23 @@ final class TokenMonitor {
 
     // MARK: Files
 
-    private struct Saved: Codable {
-        var fiveHour: [MeterReading]
-        var sevenDay: [MeterReading]
-    }
-
-    private var file: URL { AppPaths.supportDirectory.appendingPathComponent("limit-readings.json") }
+    /// Every session of the app runs in one account: the one in `WORKSPACES_CONTA`, or conta1.
+    /// Until its own file exists, the single file of earlier versions is read.
+    private let store = LimitReadingStore(account: LimitReadingStore.accountName(
+        ProcessInfo.processInfo.environment[LimitReadingStore.accountEnvKey]))
 
     private func loadReadings() {
-        guard let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(Saved.self, from: data) else { return }
+        let saved = store.load(legacy: true)
         readings5 = saved.fiveHour
         readings7 = saved.sevenDay
     }
 
     private func saveReadings() {
         pendingSave?.cancel()
-        let saved = Saved(fiveHour: readings5, sevenDay: readings7)
-        let url = file
+        let saved = LimitReadings(fiveHour: readings5, sevenDay: readings7)
+        let store = self.store
         let work = DispatchWorkItem {
-            guard let data = try? JSONEncoder().encode(saved) else { return }
-            try? data.write(to: url, options: .atomic)
+            try? store.save(saved)
         }
         pendingSave = work
         queue.asyncAfter(deadline: .now() + 2, execute: work)

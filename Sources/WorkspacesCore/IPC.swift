@@ -1,6 +1,8 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
 
 /// One message from a helper process (hook or MCP bridge) to the app, one JSON line per connection.
@@ -64,6 +66,31 @@ public enum IPCError: Error, CustomStringConvertible {
 }
 
 public enum UnixSocket {
+    /// `SOCK_STREAM` as `socket()` takes it: an enum in Glibc, a plain constant in Darwin.
+    #if canImport(Glibc)
+    public static let stream = Int32(SOCK_STREAM.rawValue)
+    #else
+    public static let stream = SOCK_STREAM
+    #endif
+
+    /// A timeout for `SO_RCVTIMEO` and `SO_SNDTIMEO`; the microseconds are Int32 in Darwin and Int in Glibc.
+    public static func timeout(_ seconds: TimeInterval) -> timeval {
+        #if canImport(Glibc)
+        return timeval(tv_sec: Int(seconds), tv_usec: Int((seconds - floor(seconds)) * 1_000_000))
+        #else
+        return timeval(tv_sec: Int(seconds), tv_usec: Int32((seconds - floor(seconds)) * 1_000_000))
+        #endif
+    }
+
+    /// Writing to a peer that went away must fail, not kill the process with SIGPIPE. Darwin turns
+    /// that off per socket; Linux has no such option, so `writeAll` sends with `MSG_NOSIGNAL` there.
+    public static func ignoreSigPipe(fd: Int32) {
+        #if canImport(Darwin)
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        #endif
+    }
+
     /// Fills a `sockaddr_un` for `path`. The path must fit in `sun_path` (104 bytes on macOS).
     public static func address(for path: String) throws -> sockaddr_un {
         var addr = sockaddr_un()
@@ -96,7 +123,11 @@ public enum UnixSocket {
         data.withUnsafeBytes { raw -> Bool in
             var offset = 0
             while offset < raw.count {
+                #if canImport(Glibc)
+                let n = send(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset, Int32(MSG_NOSIGNAL))
+                #else
                 let n = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                #endif
                 if n <= 0 { return false }
                 offset += n
             }
@@ -109,15 +140,14 @@ public enum IPCClient {
     /// Sends one request to the app and waits for its reply.
     public static func send(_ request: IPCRequest, socketPath: String = AppPaths.socketFile.path,
                             timeout: TimeInterval = 5) throws -> IPCResponse {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = socket(AF_UNIX, UnixSocket.stream, 0)
         guard fd >= 0 else { throw IPCError.system("socket", errno) }
         defer { close(fd) }
 
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: Int32((timeout - floor(timeout)) * 1_000_000))
+        var tv = UnixSocket.timeout(timeout)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        var noSigPipe: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        UnixSocket.ignoreSigPipe(fd: fd)
 
         var addr = try UnixSocket.address(for: socketPath)
         let connected = withUnsafePointer(to: &addr) {

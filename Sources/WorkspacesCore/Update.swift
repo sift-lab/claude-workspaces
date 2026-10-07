@@ -369,6 +369,9 @@ public struct UpdateInstaller {
     }
 }
 
+// The installer's real environment needs macOS (proc_pidpath, open, osascript); the Linux
+// daemon has no app to update.
+#if os(macOS)
 /// Processes whose executable lives inside an app bundle.
 public enum BundleProcesses {
     public static func pids(runningFrom bundle: URL) -> [Int32] {
@@ -456,3 +459,4 @@ public enum DetachedProcess {
         return status == 0 ? pid : nil
     }
 }
+#endif
