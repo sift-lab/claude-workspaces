@@ -1,90 +1,51 @@
 import Foundation
 import WorkspacesCore
 
-/// Runs recycle_self, recycle_session and close_session: the gate, the log, "/clear", the new
-/// conversation and the fixed message. Any step that could lose context refuses or stops instead,
-/// says why, and leaves the old conversation where it was.
+/// Runs recycle_self, recycle_session and close_session. The sequence (gate, /clear, the new
+/// conversation, the resume prompt, the check after it) is the one in WorkspacesCore
+/// (RecycleEngine); this class only points it at the app's sessions.
 @MainActor
 final class Recycler {
-    private enum Phase {
-        /// recycle_self: waits for the caller's turn to end.
-        case waitingForStop
-        /// recycle_session on a hibernated session: waits for it to start again.
-        case waitingForStart
-        /// Logged and "/clear" sent: waits for the new conversation.
-        case clearing(old: String, record: RecycleRecord)
-        /// The new conversation exists; the fixed message was typed and Enter pressed.
-        case resuming(new: String, record: RecycleRecord)
-    }
-
-    private struct Failure: Error {
-        let message: String
-    }
-
-    /// When a turn ends Claude Code may still send messages the person queued; wait, then look again.
-    static let settle: TimeInterval = 2.5
-    static let clearTimeout: TimeInterval = 30
-    static let resumeTimeout: TimeInterval = 30
-    static let wakeTimeout: TimeInterval = 120
+    /// The sessions come back a moment after the app; then what a quit interrupted is finished.
+    static let recoverDelay: TimeInterval = 10
 
     let log: RecycleLog
     private weak var model: AppModel?
-    private var phases: [UUID: Phase] = [:]
-    private var timers: [UUID: DispatchWorkItem] = [:]
-    private let projectsRoot = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/projects", isDirectory: true)
+    private let host: AppRecycleHost
+    private let engine: RecycleEngine
+    private let projectsRoot = AppRecycleHost.projectsRoot
 
     init(model: AppModel, log: RecycleLog = RecycleLog()) {
         self.model = model
         self.log = log
+        host = AppRecycleHost(model: model)
+        engine = RecycleEngine(host: host, log: log, git: "/usr/bin/git", actor: "o app", program: "Workspaces")
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.recoverDelay) { [weak self] in
+            self?.engine.recover()
+        }
     }
 
-    func isBusy(_ runtime: SessionRuntime) -> Bool { phases[runtime.id] != nil }
+    func isBusy(_ runtime: SessionRuntime) -> Bool { engine.isBusy(runtime.id) }
 
     /// The session was closed: nothing is waiting for it any more.
-    func forget(_ id: UUID) {
-        timers.removeValue(forKey: id)?.cancel()
-        phases[id] = nil
-    }
+    func forget(_ id: UUID) { engine.forget(id) }
 
     // MARK: Tools
 
     /// recycle_self: checked now, run when the caller's turn ends (its own call is part of the turn).
     func requestSelf(_ caller: SessionRuntime) -> ToolResult {
-        if let refusal = basicRefusal(caller) { return refusal }
-        if case .failure(let refusal) = RecycleGate.check(facts(for: caller), turnEnded: false) {
-            return ToolResult(text: refusal.message, isError: true)
-        }
-        phases[caller.id] = .waitingForStop
-        caller.recycle = .scheduled
-        return ToolResult(text: "Reciclagem agendada. Quando este turno terminar, o app confere a trava de novo (Passagem do FRENTE.md salva nos últimos 30 min, git status limpo, caixa de entrada vazia), registra em recycles.jsonl, envia /clear e depois a mensagem fixa de retomada. Encerre o turno agora, sem mudar mais nada.")
+        if caller.isTerminal { return Self.terminalRefusal }
+        return engine.requestSelf(caller.id)
     }
 
     /// recycle_session: runs now, or after waking a hibernated session.
     func requestSession(_ target: SessionRuntime) -> ToolResult {
-        guard let model else { return ToolResult(text: "O app está encerrando.", isError: true) }
-        if let refusal = basicRefusal(target) { return refusal }
-        let label = model.displayLabel(target)
-        if target.sleep == .hibernated {
-            if case .failure(let refusal) = RecycleGate.check(facts(for: target), turnEnded: false) {
-                return ToolResult(text: refusal.message, isError: true)
-            }
-            phases[target.id] = .waitingForStart
-            target.recycle = .waking
-            arm(target, after: Self.wakeTimeout) { [weak self, weak target] in
-                guard let self, let target else { return }
-                self.stop(target, "a sessão não voltou em 2 min depois de acordar; nada foi limpo", log: false)
-            }
-            model.wake(target.id)
-            return ToolResult(text: "\(label) estava hibernando e está acordando. A reciclagem segue quando ela abrir, com a trava conferida de novo; acompanhe em list_sessions.")
-        }
-        if target.sleep == .frozen { model.wake(target.id) }
-        switch begin(target) {
-        case .failure(let failure):
-            return ToolResult(text: failure.message, isError: true)
-        case .success(let record):
-            return ToolResult(text: "Registrado em recycles.jsonl e /clear enviado para \(label). A conversa anterior continua em \(record.oldTranscript ?? "?"). Quando a conversa nova começar, o app envia a mensagem fixa de retomada; acompanhe em list_sessions.")
-        }
+        guard model != nil else { return ToolResult(text: "O app está encerrando.", isError: true) }
+        if target.isTerminal { return Self.terminalRefusal }
+        return engine.requestSession(target.id)
     }
+
+    private static let terminalRefusal = ToolResult(text: "Recusado: é um terminal, não uma sessão do Claude.", isError: true)
 
     /// close_session: refused while the session works or waits, or with changes not committed. Logged first.
     func close(_ target: SessionRuntime) -> ToolResult {
@@ -100,7 +61,7 @@ final class Recycler {
         let record = RecycleRecord(kind: .close, session: target.id.uuidString, label: model.displayLabel(target), cwd: folder,
                                    frente: worktree.frenteText == nil ? nil : worktree.frentePath,
                                    oldConversation: conversation, oldTranscript: transcript,
-                                   handoff: worktree.frenteText.flatMap(Handoff.section(in:)),
+                                   handoff: worktree.frenteText.flatMap { Handoff.section(in: $0) },
                                    contextTokens: model.tokens.context(target))
         do {
             try log.append(record)
@@ -113,207 +74,135 @@ final class Recycler {
         return ToolResult(text: "Fechei \(label) e registrei em recycles.jsonl.\(kept)")
     }
 
-    private func basicRefusal(_ runtime: SessionRuntime) -> ToolResult? {
-        if runtime.isTerminal { return ToolResult(text: "Recusado: é um terminal, não uma sessão do Claude.", isError: true) }
-        if isBusy(runtime) { return ToolResult(text: "Recusado: já há uma reciclagem em andamento nesta sessão.", isError: true) }
-        if !runtime.host.isRunning, runtime.sleep != .hibernated {
-            return ToolResult(text: "Recusado: a sessão está encerrada.", isError: true)
-        }
-        if model?.hasPendingPaste(runtime.id) == true {
-            return ToolResult(text: "Recusado: um recado espera para ser digitado nesta sessão, e iria junto com o /clear.", isError: true)
-        }
-        return nil
-    }
-
-    // MARK: The sequence
-
-    /// Gate, log, then "/clear". Nothing is cleared unless the log line is on disk.
-    private func begin(_ runtime: SessionRuntime) -> Result<RecycleRecord, Failure> {
-        guard let model else { return .failure(Failure(message: "O app está encerrando.")) }
-        guard runtime.host.isRunning, runtime.sleep == .awake else {
-            return .failure(Failure(message: "Recusado: a sessão não está acordada."))
-        }
-        let facts = facts(for: runtime)
-        let handoff: String
-        switch RecycleGate.check(facts) {
-        case .failure(let refusal): return .failure(Failure(message: refusal.message))
-        case .success(let text): handoff = text
-        }
-        guard let old = facts.conversation, let transcript = facts.transcript else {
-            return .failure(Failure(message: RecycleRefusal.noConversation.message))
-        }
-        let record = RecycleRecord(kind: .recycle, session: runtime.id.uuidString, label: model.displayLabel(runtime),
-                                   cwd: runtime.cwd, frente: facts.worktree.frentePath, oldConversation: old,
-                                   oldTranscript: transcript, handoff: handoff, contextTokens: model.tokens.context(runtime))
-        do {
-            try log.append(record)
-        } catch {
-            return .failure(Failure(message: "Recusado: não consegui registrar em \(log.url.path) (\(error.localizedDescription)); nada foi limpo."))
-        }
-        phases[runtime.id] = .clearing(old: old, record: record)
-        runtime.recycle = .clearing
-        runtime.host.type("/clear")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self, weak runtime] in
-            guard let self, let runtime, case .clearing? = self.phases[runtime.id] else { return }
-            runtime.host.pressReturn()
-        }
-        arm(runtime, after: Self.clearTimeout) { [weak self, weak runtime] in
-            guard let self, let runtime else { return }
-            self.stop(runtime, "a conversa nova não começou em 30 s depois do /clear; a anterior continua em \(transcript)", log: true)
-        }
-        return .success(record)
-    }
+    // MARK: From the model
 
     /// Every hook, after the app applied it.
     func hook(_ update: HookUpdate, runtime: SessionRuntime) {
-        guard let phase = phases[runtime.id] else {
-            // A failed recycle stays on show until the session works again.
-            if update.event == "UserPromptSubmit", runtime.recycle?.isFailure == true { runtime.recycle = nil }
-            return
-        }
-        switch phase {
-        case .waitingForStop, .waitingForStart:
-            let trigger: String
-            if case .waitingForStop = phase { trigger = "Stop" } else { trigger = "SessionStart" }
-            if update.event == trigger {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.settle) { [weak self, weak runtime] in
-                    guard let self, let runtime else { return }
-                    self.runScheduled(runtime)
-                }
-            } else if update.status == .ended {
-                stop(runtime, "a sessão terminou antes da reciclagem; nada foi limpo", log: false)
-            }
-        case .clearing(let old, let record):
-            if update.event == "SessionStart", let new = update.claudeSessionId, new != old {
-                newConversation(new, runtime: runtime, record: record)
-            }
-        case .resuming(let new, let record):
-            if update.event == "UserPromptSubmit", update.claudeSessionId == nil || update.claudeSessionId == new {
-                succeed(runtime, new: new, record: record)
-            }
-        }
+        // A failed recycle stays on show until the session works again.
+        if !isBusy(runtime), update.event == "UserPromptSubmit", runtime.recycle?.isFailure == true { runtime.recycle = nil }
+        engine.hook(update, session: runtime.id)
     }
 
     /// The status line also tells when the conversation changed, in case the SessionStart hook is late.
     func statusLine(_ reading: StatusLineReading, runtime: SessionRuntime) {
-        guard case .clearing(let old, let record)? = phases[runtime.id], let new = reading.sessionId, new != old else { return }
-        newConversation(new, runtime: runtime, record: record)
+        engine.statusLine(conversation: reading.sessionId, session: runtime.id)
     }
 
-    /// SessionStart with source "clear": the Passagem and the old transcript, from recycles.jsonl.
+    /// SessionStart with source "clear": the Passagem, the old transcript and where the worktree stands.
     func sessionStartContext(for runtime: SessionRuntime) -> String? {
-        guard let record = RecycleLog.pendingHandoff(in: log.records(), session: runtime.id.uuidString, now: Date()) else { return nil }
-        return HookOutput.additionalContext(event: "SessionStart", Handoff.sessionStartContext(record))
+        engine.sessionStartContext(session: runtime.id)
+    }
+}
+
+/// The app's sessions as the recycle sees them. Not isolated itself: the engine calls it on the
+/// main queue, where every timer it sets runs too.
+final class AppRecycleHost: RecycleHost {
+    static let projectsRoot = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/projects", isDirectory: true)
+
+    private weak var model: AppModel?
+
+    init(model: AppModel) {
+        self.model = model
     }
 
-    private func runScheduled(_ runtime: SessionRuntime) {
-        guard let phase = phases[runtime.id] else { return }
-        switch phase {
-        case .waitingForStop, .waitingForStart: break
-        case .clearing, .resuming: return
-        }
-        // A message the person queued starts a new turn right after Stop: wait for the next one.
-        guard runtime.status == .done || runtime.status == .idle else { return }
-        cancelTimer(runtime.id)
-        phases[runtime.id] = nil
-        if runtime.sleep == .frozen { model?.wake(runtime.id) }
-        if case .failure(let failure) = begin(runtime) {
-            refuseScheduled(runtime, failure.message)
+    var now: Date { Date() }
+
+    @discardableResult
+    func after(_ seconds: TimeInterval, _ work: @escaping () -> Void) -> () -> Void {
+        let item = DispatchWorkItem(block: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+        return { item.cancel() }
+    }
+
+    func subject(_ id: UUID) -> RecycleSubject? {
+        MainActor.assumeIsolated {
+            guard let model, let runtime = model.session(id), !runtime.isTerminal else { return nil }
+            return RecycleSubject(
+                label: model.displayLabel(runtime), folder: runtime.cwd ?? model.project(runtime.projectId)?.project.path,
+                awake: runtime.host.isRunning && runtime.sleep != .hibernated, hibernated: runtime.sleep == .hibernated,
+                status: runtime.status, conversation: runtime.claudeSessionId, hasConversation: runtime.hasConversation,
+                pendingMessage: model.hasPendingPaste(id), contextTokens: model.tokens.context(runtime))
         }
     }
 
-    private func newConversation(_ new: String, runtime: SessionRuntime, record: RecycleRecord) {
-        cancelTimer(runtime.id)
-        phases[runtime.id] = .resuming(new: new, record: record)
-        runtime.recycle = .resuming
-        let text = Handoff.resumePrompt(oldTranscript: record.oldTranscript ?? "")
-        // SessionStart comes a moment before the prompt takes input.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak runtime] in
-            guard let self, let runtime, case .resuming(let current, _)? = self.phases[runtime.id], current == new else { return }
-            runtime.host.paste(text)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak runtime] in
-                guard let self, let runtime, case .resuming(let current, _)? = self.phases[runtime.id], current == new else { return }
-                runtime.host.pressReturn()
+    func screen(_ id: UUID) -> [ScreenLine] {
+        MainActor.assumeIsolated {
+            guard let runtime = model?.session(id), runtime.host.isRunning, runtime.sleep != .hibernated else { return [] }
+            let screen = runtime.host.screen(lines: 400)
+            #if DEBUG
+            if PromptScreen.inputIsEmpty(screen) != true {
+                NSLog("recycle: input line not seen empty; bottom of screen:\n%@", screen.suffix(12).map(\.text).joined(separator: "\n"))
             }
-        }
-        arm(runtime, after: Self.resumeTimeout) { [weak self, weak runtime] in
-            guard let self, let runtime else { return }
-            self.stop(runtime, "a mensagem de retomada foi digitada, mas não vi o envio em 30 s; confira a caixa de entrada da sessão", log: true)
+            #endif
+            return screen
         }
     }
 
-    private func succeed(_ runtime: SessionRuntime, new: String, record: RecycleRecord) {
-        cancelTimer(runtime.id)
-        phases[runtime.id] = nil
-        let done = RecycleRecord(kind: .resumed, session: record.session, label: record.label, cwd: record.cwd,
-                                 frente: record.frente, oldConversation: record.oldConversation,
-                                 oldTranscript: record.oldTranscript, newConversation: new)
-        try? log.append(done)
-        runtime.recycle = .done(Date())
+    func processID(_ id: UUID) -> Int32? {
+        MainActor.assumeIsolated { model?.session(id)?.host.pid }
     }
 
-    /// Something after the request went wrong. The old conversation is untouched on disk either way.
-    private func stop(_ runtime: SessionRuntime, _ reason: String, log logged: Bool) {
-        guard let phase = phases.removeValue(forKey: runtime.id) else { return }
-        cancelTimer(runtime.id)
-        if logged {
-            var record: RecycleRecord?
-            switch phase {
-            case .clearing(_, let r), .resuming(_, let r): record = r
-            case .waitingForStop, .waitingForStart: record = nil
+    func transcript(_ id: UUID, conversation: String) -> String? {
+        MainActor.assumeIsolated {
+            let hint = model?.session(id)?.transcriptPath
+            return TranscriptLocator.find(conversation: conversation, hint: hint, root: Self.projectsRoot)
+        }
+    }
+
+    func type(_ id: UUID, _ text: String) {
+        MainActor.assumeIsolated { () -> Void in model?.session(id)?.host.type(text) }
+    }
+
+    func paste(_ id: UUID, _ text: String) {
+        MainActor.assumeIsolated { () -> Void in model?.session(id)?.host.paste(text) }
+    }
+
+    func pressEnter(_ id: UUID) {
+        MainActor.assumeIsolated { () -> Void in model?.session(id)?.host.pressReturn() }
+    }
+
+    func deleteFromStart(_ id: UUID, count: Int) {
+        // Ctrl+A to the start of the line, then the Delete key (never Ctrl+D, which can end Claude).
+        MainActor.assumeIsolated { () -> Void in
+            model?.session(id)?.host.type("\u{01}" + String(repeating: "\u{1b}[3~", count: count))
+        }
+    }
+
+    func wake(_ id: UUID) -> String? {
+        MainActor.assumeIsolated {
+            guard let model else { return "o app está encerrando" }
+            model.wake(id)
+            return nil
+        }
+    }
+
+    func thaw(_ id: UUID) {
+        MainActor.assumeIsolated { () -> Void in
+            if model?.session(id)?.sleep == .frozen { model?.wake(id) }
+        }
+    }
+
+    func show(_ id: UUID, _ progress: RecycleProgress?) {
+        MainActor.assumeIsolated { () -> Void in model?.session(id)?.recycle = progress }
+    }
+
+    func tell(_ id: UUID, title: String, body: String, attention: Bool) {
+        MainActor.assumeIsolated { () -> Void in
+            guard let model, let runtime = model.session(id) else { return }
+            if attention {
+                runtime.attention = true
+                model.updateBadge()
             }
-            if var failed = record {
-                failed.time = Date()
-                failed.kind = .failed
-                failed.handoff = nil
-                failed.reason = reason
-                try? log.append(failed)
-            }
+            Notifier.shared.post(title: "\(title): \(model.displayLabel(runtime))", body: body, sessionId: id)
         }
-        tellOwner(runtime, title: "Reciclagem não terminou", reason: reason)
     }
 
-    /// A recycle_self that waited for its turn and was refused then: nobody else would see it.
-    private func refuseScheduled(_ runtime: SessionRuntime, _ message: String) {
-        let reason = message.hasPrefix("Recusado: ") ? String(message.dropFirst("Recusado: ".count)) : message
-        try? log.append(RecycleRecord(kind: .refused, session: runtime.id.uuidString, label: model?.displayLabel(runtime),
-                                      cwd: runtime.cwd, oldConversation: runtime.claudeSessionId, reason: reason))
-        tellOwner(runtime, title: "Reciclagem recusada", reason: reason)
+    func pullRequest(root: String, branch: String) -> String? {
+        guard let gh = PullRequestLookup.locate(path: nil) else { return nil }
+        return PullRequestLookup.find(gh: gh, root: root, branch: branch)
     }
 
-    private func tellOwner(_ runtime: SessionRuntime, title: String, reason: String) {
-        runtime.recycle = .failed(reason)
-        runtime.attention = true
-        model?.updateBadge()
-        let label = model?.displayLabel(runtime) ?? runtime.label
-        Notifier.shared.post(title: "\(title): \(label)", body: reason, sessionId: runtime.id)
-    }
-
-    // MARK: Facts and timers
-
-    private func facts(for runtime: SessionRuntime) -> RecycleFacts {
-        let folder = runtime.cwd ?? model?.project(runtime.projectId)?.project.path
-        let worktree = folder.map { WorktreeFacts.read(cwd: $0) } ?? WorktreeFacts(git: .failed("pasta da sessão desconhecida"))
-        let conversation = runtime.hasConversation ? runtime.claudeSessionId : nil
-        let transcript = conversation.flatMap { TranscriptLocator.find(conversation: $0, hint: runtime.transcriptPath, root: projectsRoot) }
-        let awake = runtime.host.isRunning && runtime.sleep == .awake
-        let screen = awake ? runtime.host.screen(lines: 400) : []
-        let prompt = awake ? PromptScreen.inputIsEmpty(screen) : nil
-        #if DEBUG
-        if prompt != true { NSLog("recycle: input line not seen empty; bottom of screen:\n%@", screen.suffix(12).map(\.text).joined(separator: "\n")) }
-        #endif
-        return RecycleFacts(worktree: worktree, status: runtime.status, conversation: conversation, transcript: transcript,
-                            promptEmpty: prompt)
-    }
-
-    private func arm(_ runtime: SessionRuntime, after seconds: TimeInterval, _ action: @escaping () -> Void) {
-        cancelTimer(runtime.id)
-        let work = DispatchWorkItem(block: action)
-        timers[runtime.id] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
-    }
-
-    private func cancelTimer(_ id: UUID) {
-        timers.removeValue(forKey: id)?.cancel()
+    func log(_ text: String) {
+        NSLog("recycle: %@", text)
     }
 }

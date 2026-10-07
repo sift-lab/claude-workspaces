@@ -42,7 +42,7 @@ import Testing
 
     @Test func reminderText() {
         #expect(ContextLimits.reminder(tokens: 412_345, limit: 300_000)
-                == "Contexto em 412k, acima do limite de 300k: no próximo ponto seguro, escreva a Passagem no FRENTE.md e chame recycle_self.")
+                == "Contexto em 412k, acima do limite de 300k: no próximo ponto seguro, escreva a Passagem no FRENTE.md, com data e hora no título, e chame recycle_self.")
     }
 
     @Test func shortForm() {

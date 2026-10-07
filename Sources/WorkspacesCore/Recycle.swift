@@ -10,25 +10,57 @@ import Foundation
 
 public enum Handoff {
     public static let fileName = "FRENTE.md"
-    /// The Passagem must have been written this recently.
+    /// The Passagem must have been written this recently, by the date and time in its title.
     public static let maxAge: TimeInterval = 30 * 60
+    /// A title a little ahead of the clock is a clock out of step, not a mistake.
+    static let maxAhead: TimeInterval = 5 * 60
+    /// Claude Code keeps hook context up to about 10 KB; above that it shows a short preview only.
+    public static let contextLimit = 9_000
 
-    /// What the new conversation receives after /clear. Fixed text: only the path changes.
-    public static func resumePrompt(oldTranscript: String) -> String {
-        "Leia a seção Passagem do FRENTE.md e retome. A conversa anterior está em \(oldTranscript): se faltar algo, procure nela com grep, sem ler inteira."
+    /// What the new conversation receives after /clear. Fixed text: only the paths change.
+    public static func resumePrompt(handoffFile: String, oldTranscript: String) -> String {
+        "Leia a Passagem copiada no /clear em \(handoffFile) e retome. A conversa anterior está em \(oldTranscript): se faltar algo, procure nela com grep, sem ler inteira."
     }
 
-    /// Context for the conversation that starts after a recycle's /clear (SessionStart, source "clear").
-    public static func sessionStartContext(_ record: RecycleRecord) -> String {
+    /// The first words of every resume prompt: how a prompt is told apart from any other message.
+    public static let resumePromptStart = "Leia a Passagem copiada no /clear em "
+
+    /// Everything the new conversation needs, as written to the handoff file: where it came from,
+    /// where it stands in git, what still runs in the background, and the whole Passagem.
+    public static func handoffText(_ record: RecycleRecord) -> String {
         var text = "Esta conversa começou com o /clear de uma reciclagem do Workspaces."
         if let path = record.oldTranscript {
             text += " A conversa anterior continua em \(path); o que faltar se procura nela com grep, sem ler inteira."
         }
-        if let frente = record.frente { text += " A passagem está em \(frente)." }
+        if let context = record.context {
+            text += "\n\n" + context.description
+        }
         if let handoff = record.handoff {
-            text += " Cópia da seção Passagem feita antes do /clear:\n\n" + handoff
+            var origin = "Passagem"
+            if let frente = record.frente { origin += " de \(frente)" }
+            if let date = record.handoffDate { origin += ", escrita em \(stamp(date))" }
+            text += "\n\n\(origin), copiada na hora do /clear:\n\n" + handoff
         }
         return text
+    }
+
+    /// Context for the conversation that starts after a recycle's /clear (SessionStart, source
+    /// "clear"): the handoff text when it fits, otherwise its file and its beginning.
+    public static func sessionStartContext(_ record: RecycleRecord, limit: Int = contextLimit) -> String {
+        let full = handoffText(record)
+        guard full.count > limit, let file = record.handoffFile else { return full }
+        let head = "O texto da reciclagem tem \(full.count) caracteres, mais do que cabe aqui. Leia o arquivo \(file) inteiro antes de seguir. Começo:\n\n"
+        let tail = "\n\n[continua em \(file)]"
+        return head + String(full.prefix(max(0, limit - head.count - tail.count))) + tail
+    }
+
+    static func stamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "pt_BR")
+        // Local time, as the title was written; Foundation on Linux defaults formatters to GMT.
+        formatter.timeZone = .current
+        formatter.dateFormat = "dd/MM/yyyy HH:mm"
+        return formatter.string(from: date)
     }
 
     /// Every section whose heading starts with "Passagem", from its heading to the next heading of
@@ -66,10 +98,56 @@ public enum Handoff {
         return sections
     }
 
-    /// All Passagem sections, in file order.
-    public static func section(in markdown: String) -> String? {
-        let all = sections(in: markdown)
-        return all.isEmpty ? nil : all.joined(separator: "\n\n")
+    /// The Passagem that counts: the one with the latest date and time in its title (the later
+    /// one in the file on a tie). Sections with no date in the title are not considered.
+    public static func latest(in markdown: String, now: Date, calendar: Calendar = .current) -> HandoffSection? {
+        var best: HandoffSection?
+        for text in sections(in: markdown) {
+            let title = text.components(separatedBy: "\n").first.flatMap(heading)?.title ?? ""
+            guard let date = date(inTitle: title, now: now, calendar: calendar) else { continue }
+            if best.map({ date >= $0.date }) ?? true { best = HandoffSection(text: text, title: title, date: date) }
+        }
+        return best
+    }
+
+    /// The section close_session logs: the latest dated one, or the last one in the file.
+    public static func section(in markdown: String, now: Date = Date()) -> String? {
+        latest(in: markdown, now: now)?.text ?? sections(in: markdown).last
+    }
+
+    /// The date and time in a Passagem title, local time: "07/10 14h30", "07/10/2026 14:30",
+    /// "2026-10-07 14:30", "(07/10, 08h)". A day and month without a year is the latest such day
+    /// not in the future. Nil without both a date and an hour.
+    public static func date(inTitle title: String, now: Date, calendar: Calendar = .current) -> Date? {
+        func groups(_ pattern: String) -> [String?]? {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: title, range: NSRange(title.startIndex..., in: title)) else { return nil }
+            return (1..<match.numberOfRanges).map { index in
+                Range(match.range(at: index), in: title).map { String(title[$0]) }
+            }
+        }
+        var parts = DateComponents()
+        if let iso = groups("(?<![0-9])([0-9]{4})-([0-9]{2})-([0-9]{2})(?![0-9])") {
+            parts.year = Int(iso[0]!); parts.month = Int(iso[1]!); parts.day = Int(iso[2]!)
+        } else if let br = groups("(?<![0-9/])([0-9]{1,2})/([0-9]{1,2})(?:/([0-9]{2,4}))?(?![0-9/])") {
+            parts.day = Int(br[0]!); parts.month = Int(br[1]!)
+            if let year = br[2].flatMap({ Int($0) }) { parts.year = year < 100 ? 2000 + year : year }
+        } else {
+            return nil
+        }
+        guard let time = groups("(?<![0-9:])([0-9]{1,2})(?:h([0-9]{2})?|:([0-9]{2}))(?![0-9])") else { return nil }
+        parts.hour = Int(time[0]!)
+        parts.minute = Int(time[1] ?? time[2] ?? "0")
+        guard let month = parts.month, (1...12).contains(month), let day = parts.day, (1...31).contains(day),
+              let hour = parts.hour, (0...23).contains(hour), let minute = parts.minute, (0...59).contains(minute) else { return nil }
+        if parts.year == nil {
+            let year = calendar.component(.year, from: now)
+            parts.year = year
+            if let date = calendar.date(from: parts), date > now.addingTimeInterval(24 * 3600) { parts.year = year - 1 }
+        }
+        guard let date = calendar.date(from: parts),
+              calendar.component(.day, from: date) == day, calendar.component(.month, from: date) == month else { return nil }
+        return date
     }
 
     /// True when some Passagem section has text under its heading.
@@ -90,6 +168,19 @@ public enum Handoff {
         // A closing sequence ("## Passagem ##") is not part of the title.
         while title.hasSuffix("#") { title.removeLast() }
         return (hashes, title.trimmingCharacters(in: .whitespaces))
+    }
+}
+
+/// One Passagem section and the date in its title.
+public struct HandoffSection: Equatable, Sendable {
+    public var text: String
+    public var title: String
+    public var date: Date
+
+    public init(text: String, title: String, date: Date) {
+        self.text = text
+        self.title = title
+        self.date = date
     }
 }
 
@@ -149,10 +240,12 @@ public enum GitProbe {
         porcelain.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty && !$0.hasPrefix("!!") }
     }
 
-    static func run(_ git: String, _ arguments: [String]) -> (status: Int32, output: String, error: String) {
+    static func run(_ git: String, _ arguments: [String], cwd: String? = nil,
+                    timeout: TimeInterval? = nil) -> (status: Int32, output: String, error: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: git)
         process.arguments = arguments
+        if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         var env = ProcessInfo.processInfo.environment
         env["GIT_OPTIONAL_LOCKS"] = "0"
         env["LC_ALL"] = "C"
@@ -162,6 +255,11 @@ public enum GitProbe {
         process.standardError = err
         process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return (-1, "", "\(error)") }
+        if let timeout {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                if process.isRunning { process.terminate() }
+            }
+        }
         // Read before waiting, so a large output never blocks on a full pipe.
         let output = out.fileHandleForReading.readDataToEndOfFile()
         let error = err.fileHandleForReading.readDataToEndOfFile()
@@ -216,6 +314,17 @@ public enum PromptScreen {
     /// sent prompts are echoed above with the same mark. Anything typed and not sent would go out
     /// together with "/clear", so only a positive "empty" lets a recycle through.
     public static func inputIsEmpty(_ lines: [ScreenLine]) -> Bool? {
+        inputCells(lines).map(holdsNothingTyped)
+    }
+
+    /// What is typed in the input line: "" when nothing is, nil when the line is not found.
+    public static func typedInput(_ lines: [ScreenLine]) -> String? {
+        guard let cells = inputCells(lines) else { return nil }
+        if holdsNothingTyped(cells) { return "" }
+        return String(cells.filter { !$0.faint }.map(\.character)).trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func inputCells(_ lines: [ScreenLine]) -> ArraySlice<ScreenCell>? {
         for index in lines.indices.reversed() where index > 0 {
             let above = lines[index - 1].cells.drop { $0.character == " " }
             guard let rule = above.first?.character, rules.contains(rule) else { continue }
@@ -225,7 +334,7 @@ public enum PromptScreen {
             guard rest.isEmpty || rest.first?.character.isWhitespace == true else { continue }
             var content = rest.drop { $0.character.isWhitespace }
             while let last = content.last?.character, last.isWhitespace || frame.contains(last) { content.removeLast() }
-            return holdsNothingTyped(content)
+            return content
         }
         return nil
     }
@@ -261,15 +370,22 @@ public struct RecycleFacts: Sendable {
     public var transcript: String?
     /// See `PromptScreen.inputIsEmpty`.
     public var promptEmpty: Bool?
+    /// A recado of the app's own waits to be typed in the session.
+    public var pendingMessage: Bool
+    /// What the end of the transcript says: a message that came by another way (Claude Code's own
+    /// SendMessage, a queued prompt) shows there before any hook does.
+    public var turn: TranscriptTurn
     public var now: Date
 
     public init(worktree: WorktreeFacts, status: SessionStatus, conversation: String?, transcript: String?,
-                promptEmpty: Bool?, now: Date = Date()) {
+                promptEmpty: Bool?, pendingMessage: Bool = false, turn: TranscriptTurn = .unknown, now: Date = Date()) {
         self.worktree = worktree
         self.status = status
         self.conversation = conversation
         self.transcript = transcript
         self.promptEmpty = promptEmpty
+        self.pendingMessage = pendingMessage
+        self.turn = turn
         self.now = now
     }
 }
@@ -281,12 +397,24 @@ public enum RecycleRefusal: Error, Equatable, Sendable {
     case gitFailed(String)
     case noFrente(String)
     case noHandoffSection(String)
+    case undatedHandoff(String)
     case emptyHandoffSection(String)
     case staleHandoff(String, minutes: Int)
+    case futureHandoff(String, title: String)
     case dirtyTree([String])
     case midTurn(SessionStatus)
+    case pendingMessage
+    case turnInTranscript(String)
     case promptNotEmpty
     case promptUnknown
+
+    /// The session is not stopped: a recycle that was due waits for the next end of turn instead.
+    public var isBusy: Bool {
+        switch self {
+        case .midTurn, .pendingMessage, .turnInTranscript: return true
+        default: return false
+        }
+    }
 
     public var message: String {
         switch self {
@@ -299,19 +427,27 @@ public enum RecycleRefusal: Error, Equatable, Sendable {
         case .gitFailed(let error):
             return "Recusado: o git status falhou (\(error)), então não dá para conferir que nada ficou sem commit."
         case .noFrente(let path):
-            return "Recusado: falta o \(path). Escreva nele a seção Passagem (item em curso com ramo, commit e PR, o que falta, jobs na fila, próximos itens, decisões, armadilhas, vigias ligados) e chame de novo."
+            return "Recusado: falta o \(path). Escreva nele a seção Passagem, com data e hora no título (## Passagem 07/10 14h30), e chame de novo."
         case .noHandoffSection(let path):
-            return "Recusado: o \(path) não tem seção com título começando por \"Passagem\". Escreva a passagem e chame de novo."
+            return "Recusado: o \(path) não tem seção com título começando por \"Passagem\". Escreva a passagem, com data e hora no título (## Passagem 07/10 14h30), e chame de novo."
+        case .undatedHandoff(let path):
+            return "Recusado: nenhuma seção Passagem do \(path) tem data e hora no título, e é por ela que a idade da passagem é medida. Escreva o título como \"## Passagem 07/10 14h30\" e chame de novo."
         case .emptyHandoffSection(let path):
-            return "Recusado: a seção Passagem do \(path) está vazia."
+            return "Recusado: a seção Passagem mais recente do \(path) está vazia."
         case .staleHandoff(let path, let minutes):
-            return "Recusado: o \(path) foi salvo há \(minutes) min, e a passagem precisa ter sido escrita nos últimos 30 min. Atualize a seção Passagem e chame de novo."
+            return "Recusado: a Passagem mais recente do \(path) é de \(minutes) min atrás, pela data e hora do título, e precisa ter sido escrita nos últimos 30 min. Escreva uma seção nova, com a hora de agora no título, e chame de novo."
+        case .futureHandoff(let path, let title):
+            return "Recusado: a Passagem \"\(title)\" do \(path) tem data e hora no futuro. Corrija o título com a hora de agora e chame de novo."
         case .dirtyTree(let lines):
             let shown = lines.prefix(8).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: ", ")
             let more = lines.count > 8 ? " e mais \(lines.count - 8)" : ""
             return "Recusado: a árvore tem mudanças sem commit (\(shown)\(more)). Faça commit, ou ponha no ignore o que for descartável, e chame de novo."
         case .midTurn(let status):
             return "Recusado: a sessão está no meio de um turno (\(status.label.lowercased())). Chame de novo quando ela estiver parada."
+        case .pendingMessage:
+            return "Recusado: um recado espera para ser digitado nesta sessão, e iria junto com o /clear."
+        case .turnInTranscript(let reason):
+            return "Recusado: \(reason). Chame de novo quando a sessão estiver parada."
         case .promptNotEmpty:
             return "Recusado: há texto não enviado na caixa de entrada da sessão, e ele iria junto com o /clear. Envie ou apague o texto e chame de novo."
         case .promptUnknown:
@@ -321,14 +457,18 @@ public enum RecycleRefusal: Error, Equatable, Sendable {
 }
 
 public enum RecycleGate {
-    /// The Passagem text when everything holds, or the first reason to refuse.
+    /// The Passagem when everything holds, or the first reason to refuse.
     /// `turnEnded` is false only when recycle_self schedules itself: the caller is in the middle of
     /// its own turn, so the turn and the prompt are checked again when it ends.
     public static func check(_ facts: RecycleFacts, turnEnded: Bool = true,
-                             maxAge: TimeInterval = Handoff.maxAge) -> Result<String, RecycleRefusal> {
+                             maxAge: TimeInterval = Handoff.maxAge) -> Result<HandoffSection, RecycleRefusal> {
         guard facts.conversation != nil else { return .failure(.noConversation) }
         guard facts.transcript != nil else { return .failure(.noTranscript) }
-        if turnEnded, facts.status == .working || facts.status == .waiting { return .failure(.midTurn(facts.status)) }
+        if facts.pendingMessage { return .failure(.pendingMessage) }
+        if turnEnded {
+            if facts.status == .working || facts.status == .waiting { return .failure(.midTurn(facts.status)) }
+            if case .busy(let reason) = facts.turn { return .failure(.turnInTranscript(reason)) }
+        }
         let worktree = facts.worktree
         switch worktree.git {
         case .notRepository: return .failure(.notRepository)
@@ -338,11 +478,12 @@ public enum RecycleGate {
         guard let path = worktree.frentePath, let text = worktree.frenteText else {
             return .failure(.noFrente(worktree.frentePath ?? Handoff.fileName))
         }
-        let sections = Handoff.sections(in: text)
-        guard !sections.isEmpty else { return .failure(.noHandoffSection(path)) }
-        guard Handoff.hasBody(sections) else { return .failure(.emptyHandoffSection(path)) }
-        let age = facts.now.timeIntervalSince(worktree.frenteModified ?? .distantPast)
+        guard !Handoff.sections(in: text).isEmpty else { return .failure(.noHandoffSection(path)) }
+        guard let section = Handoff.latest(in: text, now: facts.now) else { return .failure(.undatedHandoff(path)) }
+        guard Handoff.hasBody([section.text]) else { return .failure(.emptyHandoffSection(path)) }
+        let age = facts.now.timeIntervalSince(section.date)
         guard age <= maxAge else { return .failure(.staleHandoff(path, minutes: Int(min(age, 1e7) / 60))) }
+        guard age >= -Handoff.maxAhead else { return .failure(.futureHandoff(path, title: section.title)) }
         if case .dirty(let lines) = worktree.git { return .failure(.dirtyTree(lines)) }
         if turnEnded {
             switch facts.promptEmpty {
@@ -351,7 +492,7 @@ public enum RecycleGate {
             case nil: return .failure(.promptUnknown)
             }
         }
-        return .success(sections.joined(separator: "\n\n"))
+        return .success(section)
     }
 
     /// close_session: never while the session works or waits, never with uncommitted changes.
@@ -377,16 +518,27 @@ public enum RecycleGate {
 /// One line of recycles.jsonl. Append only: nothing in it, or in the transcripts it points to, is ever deleted.
 public struct RecycleRecord: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        /// Logged before /clear is sent.
+        /// Logged right before Enter sends the /clear.
         case recycle
-        /// The new conversation received the fixed message.
+        /// The new conversation sent the resume prompt.
         case resumed
         /// Something after the log went wrong; the old conversation is still on disk.
         case failed
         /// A recycle_self waited for its turn to end and the gate refused it then.
         case refused
+        /// The session was not stopped when the /clear was due: it waits for the next end of turn.
+        case deferred
+        /// The new conversation did not start in time after /clear. The recycle stays open: if the
+        /// /clear runs later, the new conversation still gets the Passagem and the resume prompt.
+        case delayed
+        /// The check a few minutes after a resume: `verdict` and `reason`.
+        case verified
         /// close_session.
         case close
+    }
+
+    public enum Verdict: String, Codable, Sendable {
+        case conferida, quebrada
     }
 
     public var time: Date
@@ -399,14 +551,22 @@ public struct RecycleRecord: Codable, Equatable, Sendable {
     public var oldConversation: String?
     public var oldTranscript: String?
     public var newConversation: String?
-    /// Copy of the Passagem section(s) at that moment.
+    /// Copy of the Passagem section at that moment.
     public var handoff: String?
+    /// The date and time in the Passagem's title.
+    public var handoffDate: Date?
+    /// Where the whole text the new conversation gets was written.
+    public var handoffFile: String?
+    /// Branch, HEAD, pull request and background tasks at the /clear.
+    public var context: RecycleContext?
     public var contextTokens: Int?
+    public var verdict: Verdict?
     public var reason: String?
 
     public init(time: Date = Date(), kind: Kind, session: String, label: String? = nil, cwd: String? = nil,
                 frente: String? = nil, oldConversation: String? = nil, oldTranscript: String? = nil,
-                newConversation: String? = nil, handoff: String? = nil, contextTokens: Int? = nil, reason: String? = nil) {
+                newConversation: String? = nil, handoff: String? = nil, handoffDate: Date? = nil, handoffFile: String? = nil,
+                context: RecycleContext? = nil, contextTokens: Int? = nil, verdict: Verdict? = nil, reason: String? = nil) {
         self.time = time
         self.kind = kind
         self.session = session
@@ -417,8 +577,21 @@ public struct RecycleRecord: Codable, Equatable, Sendable {
         self.oldTranscript = oldTranscript
         self.newConversation = newConversation
         self.handoff = handoff
+        self.handoffDate = handoffDate
+        self.handoffFile = handoffFile
+        self.context = context
         self.contextTokens = contextTokens
+        self.verdict = verdict
         self.reason = reason
+    }
+
+    /// The same recycle, as a later line of another kind: no copy of the Passagem again.
+    public func followUp(_ kind: Kind, time: Date, newConversation: String? = nil, verdict: Verdict? = nil,
+                         reason: String? = nil) -> RecycleRecord {
+        RecycleRecord(time: time, kind: kind, session: session, label: label, cwd: cwd, frente: frente,
+                      oldConversation: oldConversation, oldTranscript: oldTranscript,
+                      newConversation: newConversation ?? self.newConversation, handoffFile: handoffFile,
+                      verdict: verdict, reason: reason)
     }
 }
 
@@ -455,18 +628,6 @@ public struct RecycleLog: Sendable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return data.split(separator: 0x0A).compactMap { try? decoder.decode(RecycleRecord.self, from: Data($0)) }
-    }
-
-    /// What a conversation that just started after /clear should receive: the newest recycle of
-    /// this session that no later record closed (resumed, failed, refused, close), if recent.
-    public static func pendingHandoff(in records: [RecycleRecord], session: String, now: Date,
-                                      within: TimeInterval = 15 * 60) -> RecycleRecord? {
-        var pending: RecycleRecord?
-        for record in records where record.session == session {
-            pending = record.kind == .recycle ? record : nil
-        }
-        guard let pending, now.timeIntervalSince(pending.time) <= within else { return nil }
-        return pending
     }
 }
 

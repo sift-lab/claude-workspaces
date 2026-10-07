@@ -17,10 +17,12 @@ public struct HookUpdate: Equatable, Sendable {
     public var clearsActivity: Bool
     /// A prompt was sent, so Claude now has a conversation it can resume.
     public var startsConversation: Bool
+    /// UserPromptSubmit only: the text that was sent.
+    public var prompt: String?
 
     public init(event: String = "", status: SessionStatus?, message: String? = nil, claudeSessionId: String? = nil,
                 cwd: String? = nil, transcriptPath: String? = nil, source: String? = nil,
-                clearsActivity: Bool = false, startsConversation: Bool = false) {
+                clearsActivity: Bool = false, startsConversation: Bool = false, prompt: String? = nil) {
         self.event = event
         self.status = status
         self.message = message
@@ -30,6 +32,7 @@ public struct HookUpdate: Equatable, Sendable {
         self.source = source
         self.clearsActivity = clearsActivity
         self.startsConversation = startsConversation
+        self.prompt = prompt
     }
 }
 
@@ -50,6 +53,7 @@ public enum HookEvent {
             update.status = .working
             update.clearsActivity = true
             update.startsConversation = true
+            update.prompt = payload["prompt"]?.stringValue
         case "PostToolUse":
             // After a permission prompt is answered the tool runs, so this also clears "waiting".
             update.status = .working

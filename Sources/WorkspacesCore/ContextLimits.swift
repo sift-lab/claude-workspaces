@@ -53,7 +53,7 @@ public struct ContextLimits: Equatable, Sendable {
 
     /// What the hooks add to the session's context while the context is above the limit.
     public static func reminder(tokens: Int, limit: Int) -> String {
-        "Contexto em \(short(tokens)), acima do limite de \(short(limit)): no próximo ponto seguro, escreva a Passagem no FRENTE.md e chame recycle_self."
+        "Contexto em \(short(tokens)), acima do limite de \(short(limit)): no próximo ponto seguro, escreva a Passagem no FRENTE.md, com data e hora no título, e chame recycle_self."
     }
 
     /// "963k", the way list_sessions and the reminder write a context.

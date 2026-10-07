@@ -5,7 +5,7 @@ import WorkspacesCore
 /// differently (send_message presses Enter, open_session takes an account and a model, notify goes
 /// to the phone) the description says so; the rest are the Mac's own.
 public enum ServerTools {
-    public static let instructions = "This session runs on the server under workspacesd, next to other Claude Code sessions in tmux. Use set_status at the start of long steps; use list_sessions to see sibling sessions. In projects that keep a FRENTE.md, when an item's PR is open or the context passes the limit, write its Passagem section, commit, and call recycle_self."
+    public static let instructions = "This session runs on the server under workspacesd, next to other Claude Code sessions in tmux. Use set_status at the start of long steps; use list_sessions to see sibling sessions. " + MCPServer.handoffRule
 
     private static func mac(_ name: String) -> ToolDefinition {
         WorkspaceTools.all.first { $0.name == name }!
