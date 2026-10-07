@@ -32,7 +32,8 @@ The screenshots come from a demo workspace with made-up projects (`./scripts/scr
 - **Sleep for idle sessions.** A session that is off screen, not waiting for you and not running a command is frozen (`SIGSTOP`, zero CPU, instant wake) and later hibernated (the process ends and the conversation resumes with `claude --resume` when you open it).
 - **Tokens and the limit.** Next to each session's state, how much context it carries (and whether it is climbing fast or close to the ceiling); a popover shows the context through the day, each compaction, when the next one comes at the current pace, and the session's part of the 5 h window. The toolbar ring shows the 5 h window; the menu bar shows both windows of the account's limit with where they land at the current pace, and a notification comes when the 5 h window would run out before it resets.
 - **Usage screen.** "Agora": the 5 h window and the week with their projections, and every session's context, last-hour trend and share of the window. "Semana": spend per day and workspace, what weighs the most (rereading context, agents, models) and the heaviest sessions. A session opens in full: context and spend every 5 minutes, side by side, and the stretches between compactions. "Máquina": memory and CPU of every session (Claude plus its MCP servers), totals, and how much hibernation freed.
-- **Resume on relaunch.** Sessions reopen with their conversations when you open a workspace again.
+- **Resume on relaunch.** Sessions reopen with their conversations when you open a workspace again. After a `/clear` the app keeps the new conversation as soon as it has a message (see [Which conversation resumes](#which-conversation-resumes)).
+- **Updates itself.** "Procurar atualizações…" in the app menu, and the same check in silence at launch and every 30 minutes, against the `main` branch of the repository the app was built from. A new commit is built in the background and the app asks before restarting into it (see [Updating](#updating)).
 - **One item, one session.** Long-lived conversations reread their whole context on every call. Past a limit you set (300 thousand tokens by default) a session is marked "precisa de passagem" and is reminded to write a handoff; `recycle_self` then starts it over in a clean conversation that picks up from that handoff, behind locks that refuse whenever context could be lost (see [Recycling a session](#recycling-a-session)).
 
 ## Requirements
@@ -49,6 +50,8 @@ cd claude-workspaces
 ./scripts/build-app.sh --install   # builds build/Workspaces.app and copies it to ~/Applications
 open ~/Applications/Workspaces.app
 ```
+
+`build-app.sh` stamps the commit and the repository into `Info.plist`; from then on the installed app [updates itself](#updating) from that repository's `main`, so `--install` is only needed once. `WORKSPACES_BUILD_JOBS=2` limits the compile jobs.
 
 Run the tests with `swift test`. To regenerate the icon after editing `Resources/AppIcon.svg`, run `swift scripts/make-icon.swift`.
 
@@ -104,6 +107,22 @@ While a session is past the limit, the `PostToolUse` and `UserPromptSubmit` hook
 
 The hook output follows Claude Code's documented format (`hookSpecificOutput` with `hookEventName` and `additionalContext`, see [Hooks](https://code.claude.com/docs/en/hooks)); the helper only ever prints a JSON object the app sent, never plain text.
 
+### Which conversation resumes
+
+Every hook feeds one rule (`ConversationTracker`): the conversation to reopen with `--resume` is the current one once it has a message (`UserPromptSubmit`, `PostToolUse`, `Stop` or a permission request). Right after a `/clear` the new conversation is still empty and `--resume` could not open it, so a relaunch in that moment starts clean. A `SessionEnd` only says which conversation ended, and a conversation that ended or was replaced never comes back from a late hook (Claude Code cuts the `SessionEnd` hooks of a `/clear` at 1.5 s, so one can arrive after the new conversation started); only a resume reopens it. Each change of the saved conversation is a line in `~/Library/Application Support/Workspaces/conversations.jsonl`.
+
+### Updating
+
+The app updates itself from the `main` branch of the repository it was built from (`WorkspacesRepository` in `Info.plist`), like any Mac app:
+
+1. **Check.** "Procurar atualizações…" in the app menu, and the same check in silence 60 s after launch and every 30 minutes. If the repository has an `origin`, it is fetched first (only `origin/main` moves; nothing checked out is touched), and `origin/main` is used when it is ahead of the local `main`. There is an update when that commit contains the installed one and is a different one; a build ahead of `main` (from a branch not merged yet) is never replaced by an older one. A manual check with nothing new says "Você já está na versão mais recente".
+2. **Build.** In a worktree of its own (`~/Library/Caches/Workspaces/update-wt`, never the one you develop in), with `scripts/build-app.sh`, `-j 2`, utility QoS and `nice 15`, and only with more than 30% of memory and 4 GB of disk free (it waits up to 25 minutes, then tries again at the next check). The build is refused if it is not the commit asked for or if it is not signed by the same team as the installed app, which would drop the macOS permissions. The log is `update/build.log` in the support folder.
+3. **Ask.** A standard macOS dialog, "Há uma versão nova do Workspaces", with "Reiniciar agora" and "Depois", as a sheet on a workspace window (an automatic check does not take the focus; the Dock icon bounces). When sessions are working or waiting for you, it says how many and that they will be interrupted and come back with `--resume`. Nothing is applied without "Reiniciar agora"; after "Depois" the dialog comes back with a newer commit, at the next launch or with "Procurar atualizações…".
+4. **Apply.** The app copies its `workspaces-hook` out of the bundle, writes the plan and the open windows, starts it detached (`apply-update`, in a session of its own) and quits, closing its sessions as on any quit. The helper waits for the app to exit, moves the installed app to `update/Workspaces-previous.app`, puts the new one in its place and opens it. The new app writes `update/heartbeat.json` (its pid and commit) once it finished launching; without it in 20 s, or if the process is gone 3 s later, the helper ends the new app, puts the previous one back, opens it, sends a notification and does not offer that commit again (`update/failed.json`). The steps are in `update/apply.log`.
+5. **Come back.** Saved sessions resume with `--resume` as on every launch; windows that macOS's window restoration did not bring back are opened again.
+
+The build runs whatever is on `main` (or on `origin/main`, when it is ahead) and signs it with your certificate: only point the app at a repository you trust.
+
 ### Configuration
 
 Settings live in `~/Library/Application Support/Workspaces/workspaces.json` and can be edited in the app. Per project you can set where new sessions open, how many open with the workspace, and extra `claude` arguments (for example `--add-dir ../api`). Freeze and hibernate delays are in Settings, under "Economia"; the context above which a session needs its handoff (`handoffContextTokens`, 300 thousand by default) is under "Contexto".
@@ -128,9 +147,11 @@ App nativo para macOS que organiza as sessões do Claude Code por workspace: uma
 - Cada sessão mostra o contexto que carrega, se está subindo rápido ou perto do teto, quando compacta de novo e quanto gastou da janela de 5 h. A barra de menu e o anel da barra mostram a janela de 5 h e a semana com a projeção no ritmo atual, e um aviso chega quando a janela acaba antes de renovar.
 - A tela de Consumo tem três abas: Agora (janela, semana e cada sessão), Semana (gasto por dia, por workspace e o que mais pesa) e Máquina (memória e CPU). Uma sessão abre inteira, com o contexto e o gasto do dia lado a lado.
 - Um item, uma sessão: acima de um limite de contexto (300 mil por padrão, nos Ajustes) a sessão aparece como "precisa de passagem" e recebe um aviso a cada 50 mil. Ela escreve a seção Passagem no FRENTE.md da raiz da worktree, faz commit e chama `recycle_self`. O app confere as travas (passagem salva nos últimos 30 min, git status limpo, sessão parada, caixa de entrada vazia), registra tudo em `recycles.jsonl` antes de limpar, envia `/clear` e depois uma mensagem fixa que manda ler a passagem e aponta o .jsonl da conversa anterior. Nada é apagado. `recycle_session` faz o mesmo a pedido de uma orquestradora; `close_session` recusa sessão trabalhando ou com mudança sem commit. Acima de 500 mil chega uma notificação e a marca fica vermelha; o app nunca troca o modelo nem força compactação.
+- Depois de um /clear, o app guarda a conversa nova assim que ela tem uma mensagem; um hook atrasado da conversa anterior não a traz de volta. Cada troca fica em `conversations.jsonl`.
+- Atualiza sozinho a partir da main do repositório de onde foi compilado: "Procurar atualizações…" no menu do app, e a mesma procura em silêncio ao abrir e a cada 30 min. Achou commit novo, compila em segundo plano num worktree próprio (-j 2, prioridade baixa, só com mais de 30% de memória livre) e mostra "Há uma versão nova do Workspaces" com "Reiniciar agora" e "Depois", dizendo quantas sessões estão trabalhando. Só aplica no clique. Um auxiliar destacado troca o app, guarda o anterior e, se a versão nova não abrir em 20 s, volta a anterior e avisa.
 - Nada muda na sua configuração do Claude Code: tudo vai por `--settings` e `--mcp-config`.
 
-Para instalar: `./scripts/build-app.sh --install` e abrir `~/Applications/Workspaces.app`. Precisa de macOS 14 ou mais novo, Claude Code instalado e Xcode 16 ou mais novo.
+Para instalar: `./scripts/build-app.sh --install` e abrir `~/Applications/Workspaces.app`. Depois disso o app se atualiza sozinho. Precisa de macOS 14 ou mais novo, Claude Code instalado e Xcode 16 ou mais novo.
 
 ## License
 
