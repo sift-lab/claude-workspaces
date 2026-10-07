@@ -64,7 +64,8 @@ private let mainCommit = "2222222bbbbbbb"
         #expect(BuildGate.check(freeMemoryPercent: 31, freeDiskBytes: 10 << 30) == .go)
         #expect(BuildGate.check(freeMemoryPercent: 30, freeDiskBytes: 10 << 30) != .go)
         #expect(BuildGate.check(freeMemoryPercent: nil, freeDiskBytes: 10 << 30) != .go)
-        #expect(BuildGate.check(freeMemoryPercent: 80, freeDiskBytes: 3 << 30) != .go)
+        #expect(BuildGate.check(freeMemoryPercent: 80, freeDiskBytes: 1 << 30) != .go)
+        #expect(BuildGate.check(freeMemoryPercent: 80, freeDiskBytes: 3 << 30) == .go)
         #expect(BuildGate.check(freeMemoryPercent: 80, freeDiskBytes: nil) == .go)
     }
 

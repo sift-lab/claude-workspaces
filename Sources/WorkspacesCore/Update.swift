@@ -72,7 +72,8 @@ public enum UpdateDecision {
 /// The build waits for room: it runs next to Claude sessions on a machine that may have 8 GB.
 public enum BuildGate {
     public static let minimumFreeMemoryPercent = 30
-    public static let minimumFreeDiskBytes: Int64 = 4 * 1024 * 1024 * 1024
+    /// A release build in a fresh worktree takes about half a gigabyte.
+    public static let minimumFreeDiskBytes: Int64 = 2 * 1024 * 1024 * 1024
 
     public enum Result: Equatable, Sendable {
         case go
