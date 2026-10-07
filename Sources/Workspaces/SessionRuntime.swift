@@ -23,9 +23,11 @@ final class SessionRuntime: Identifiable {
     @ObservationIgnored var lastSeen = Date()
     /// Increases on every launch; hooks from an older process carry an older number.
     @ObservationIgnored var launch = 0
-    var claudeSessionId: String?
-    /// True once a prompt was sent; before that Claude has saved nothing to resume.
-    var hasConversation = false
+    /// Which conversation Claude is in, and which one `claude --resume` opens; fed by every hook.
+    var conversation = ConversationTracker(saved: nil)
+    var claudeSessionId: String? { conversation.current }
+    /// True once the conversation has a message; before that Claude has nothing to resume.
+    var hasConversation: Bool { conversation.resumable != nil }
     var worktree: String?
     var cwd: String?
     var snapshot: [String] = []

@@ -232,8 +232,7 @@ final class AppModel {
     private func launch(saved: SavedSession, project: Project, workspaceId: UUID, prompt: String? = nil) -> SessionRuntime {
         let runtime = SessionRuntime(id: saved.id, workspaceId: workspaceId, projectId: project.id,
                                      label: saved.label, worktree: saved.worktree, isTerminal: saved.terminal)
-        runtime.claudeSessionId = saved.claudeSessionId
-        runtime.hasConversation = saved.claudeSessionId != nil
+        runtime.conversation = ConversationTracker(saved: saved.claudeSessionId)
         runtime.cwd = saved.cwd
         sessions.append(runtime)
         start(runtime, project: project, prompt: prompt)
@@ -254,7 +253,8 @@ final class AppModel {
             startShell(runtime, in: folder, environment: loginEnvironment)
             return
         }
-        let resuming = runtime.hasConversation && runtime.claudeSessionId != nil
+        let resumeId = runtime.conversation.resumable
+        let resuming = resumeId != nil
         var folder = project.path
         var worktree = resuming ? nil : runtime.worktree
         if resuming, let cwd = runtime.cwd, FileManager.default.fileExists(atPath: cwd) { folder = cwd }
@@ -269,7 +269,7 @@ final class AppModel {
             settingsFile: AppPaths.claudeSettingsFile.path,
             mcpConfigFile: mcpConfigFile(for: runtime.id),
             name: "\(project.name) \(runtime.label)",
-            resumeId: resuming ? runtime.claudeSessionId : nil,
+            resumeId: resumeId,
             worktree: worktree,
             prompt: prompt,
             extraArguments: project.claudeArguments
@@ -401,7 +401,7 @@ final class AppModel {
     func sleepNow(_ id: UUID) {
         guard let runtime = session(id), runtime.host.isRunning, !runtime.shellOnly,
               !Set(visibleByWindow.values).contains(id) else { return }
-        if runtime.hasConversation, runtime.claudeSessionId != nil { hibernate(runtime) }
+        if runtime.hasConversation { hibernate(runtime) }
         else if runtime.host.freeze() { runtime.sleep = .frozen }
     }
 
@@ -420,8 +420,7 @@ final class AppModel {
             seen.insert(summary.id)
             let runtime = SessionRuntime(id: UUID(), workspaceId: workspace.id, projectId: project.id,
                                          label: summary.branch ?? project.name, worktree: nil)
-            runtime.claudeSessionId = summary.id
-            runtime.hasConversation = true
+            runtime.conversation = ConversationTracker(saved: summary.id)
             runtime.status = .idle
             sessions.append(runtime)
             if first == nil { first = runtime }
@@ -568,7 +567,9 @@ final class AppModel {
         updateProject(runtime.projectId) { project in
             guard let i = project.savedSessions.firstIndex(where: { $0.id == runtime.id }) else { return }
             project.savedSessions[i].label = runtime.label
-            if runtime.hasConversation { project.savedSessions[i].claudeSessionId = runtime.claudeSessionId }
+            // Nil right after a /clear, until the new conversation has a message: a relaunch then
+            // starts clean instead of reopening the conversation that was cleared.
+            project.savedSessions[i].claudeSessionId = runtime.conversation.resumable
             project.savedSessions[i].cwd = runtime.cwd
         }
     }
@@ -661,8 +662,11 @@ final class AppModel {
             runtime.message = status == .waiting ? update.message : nil
         }
         if update.clearsActivity { runtime.activity = nil }
-        if let id = update.claudeSessionId { runtime.claudeSessionId = id }
-        if update.startsConversation { runtime.hasConversation = true }
+        let resumable = runtime.conversation.resumable
+        if runtime.conversation.apply(update) {
+            ConversationLog.append(session: runtime.id, label: runtime.label, update: update,
+                                   from: resumable, to: runtime.conversation.resumable)
+        }
         if let cwd = update.cwd, !samePath(cwd, runtime.cwd) {
             // The name follows the branch only when it was a branch name; a name the person
             // gave ("automação na QA") stays.
