@@ -345,7 +345,7 @@ public final class TranscriptScanner: @unchecked Sendable {
                     let newline = base.distance(to: hit.assumingMemoryBound(to: UInt8.self))
                     let length = newline - start
                     let line = UnsafeRawPointer(base + start)
-                    if length > 0, Transcript.usageMarker.withUnsafeBytes({ memmem(line, length, $0.baseAddress, $0.count) }) != nil {
+                    if length > 0, Transcript.usageMarker.withUnsafeBytes({ memmem(line, length, $0.baseAddress!, $0.count) }) != nil {
                         candidates.append(start..<newline)
                     }
                     start = newline + 1

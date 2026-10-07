@@ -231,6 +231,7 @@ private final class Harness {
     }
 }
 
+#if os(macOS)
 @Suite struct DetachedProcessTests {
     @Test func theHelperRunsInASessionOfItsOwn() throws {
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("ws-detached-\(UUID().uuidString).log")
@@ -242,3 +243,4 @@ private final class Harness {
         #expect(getsid(pid) != getsid(0))
     }
 }
+#endif

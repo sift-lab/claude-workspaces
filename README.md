@@ -66,7 +66,7 @@ open -a Workspaces --args --open "Work"
 - **No changes to your Claude Code setup.** Each session starts `claude` with `--settings` (hooks) and `--mcp-config` (the MCP server) pointing to files in `~/Library/Application Support/Workspaces/`. Your `~/.claude` settings are left untouched.
 - **Hooks** run a tiny helper (`workspaces-hook`, Foundation only) that forwards the event to the app over a unix socket. It never blocks Claude.
 - **MCP** is served by the app itself over HTTP on `127.0.0.1`, with a random token per launch, so no helper process runs per session.
-- **Tokens** are read from Claude Code's transcripts in `~/.claude/projects` (two weeks, each file from where the last read stopped; agents count toward the session that started them). The account's limit comes from the status line: the settings file sets `statusLine` to the hook helper, which tells the app what Claude Code reported (`context_window`, `rate_limits`) and then prints your own status line, if you have one. Weighing tokens by API price turns them into one number; readings of the meter calibrate how much of it fills each window.
+- **Tokens** are read from Claude Code's transcripts in `~/.claude/projects` (two weeks, each file from where the last read stopped; agents count toward the session that started them). The account's limit comes from the status line: the settings file sets `statusLine` to the hook helper, which tells the app what Claude Code reported (`context_window`, `rate_limits`) and then prints your own status line, if you have one. Weighing tokens by API price turns them into one number; readings of the meter calibrate how much of it fills each window. The readings are kept per account in `limit-readings-<account>.json`, the account named by `WORKSPACES_CONTA` (`conta1` when unset), which every session also gets in its environment.
 - **Launch.** The app reads your login shell environment once and then starts `claude` directly, so each session skips the cost of a login shell. Commands that need shell syntax fall back to the login shell.
 - **Crash safety.** On `SIGTERM` the app closes its sessions; on launch it ends orphaned sessions left by a crashed run (only processes that carry its own settings file).
 
@@ -129,12 +129,45 @@ Settings live in `~/Library/Application Support/Workspaces/workspaces.json` and 
 
 To look at the screens without touching an installed app that hosts your sessions, run the built binary with its own support folder: `WORKSPACES_HOME=$(mktemp -d) WORKSPACES_TOKEN_SHOTS=<folder> build/Workspaces.app/Contents/MacOS/Workspaces` renders the token screens (sidebar marks included) from this Mac's transcripts and quits.
 
+### Scripts
+
+`workspaces-hook tool <name> ['{json}']` runs one MCP tool in the running app, for scripts that open, list, recycle or close sessions (as no session; run inside a session, it acts as that session, with its limits): `workspaces-hook tool list_sessions '{"all_workspaces":true}'`. It prints the tool's text and exits 0, 1 when the tool refused, 2 on bad usage and 3 when the app did not answer.
+
+## On a Linux server (workspacesd)
+
+`workspacesd` is the app without a screen, for a Linux machine where Claude Code sessions run unattended. Sessions run in tmux (`tmux attach -t ws-<id>` to look at one), and the same MCP tools, hooks, recycle locks and logs come from `WorkspacesCore`, so the rule is one on both machines.
+
+```sh
+./scripts/install-server.sh   # builds, installs to ~/.local/bin, runs it as a systemd user service
+workspacesd open ~/src/acme --modelo sonnet --conta conta2 --prompt "Leia o FRENTE.md"
+workspacesd status
+workspacesd send 3f2a "Responda os comentários do PR"
+workspacesd recycle 3f2a
+workspacesd close 3f2a
+```
+
+It needs Swift 6 for Linux (with [swiftly](https://www.swift.org/install/linux/)), tmux, git and curl. Files live in `~/.workspaces` (`WORKSPACES_HOME` changes it): `workspaces.json` (projects, as in the app), `server.json`, `server-sessions.json`, `recycles.jsonl`, `conversations.jsonl`, `limit-readings-<account>.json` and `workspacesd.log`.
+
+What differs from the app:
+
+- **Accounts and models.** `open_session` takes `account` and `model`. Each account is a Claude Code config folder, `~/.claude-<account>` unless `server.json` says otherwise in `accounts`; the session starts with `CLAUDE_CONFIG_DIR` set to it and `WORKSPACES_CONTA` set to its name. `open_session` also takes a `path`, which becomes a project in the "Servidor" workspace when it is not one yet.
+- **`send_message` presses Enter.** The message is pasted (bracketed paste) and sent; a session in the middle of a turn gets it queued. A hibernated one wakes with `--resume` and gets it once its prompt is up.
+- **`notify` goes to the phone** through [ntfy](https://ntfy.sh): set `ntfyTopic` (and `ntfyServer`, `https://ntfy.sh` by default) in `server.json`. Keep the topic secret; anyone who knows it can read it. Without a topic the message goes to `workspacesd.log`.
+- **Folder trust.** Claude Code asks once per folder whether to trust it. Inside `trustedRoots` (`server.json`, by default `~/src` and `~/obra`) the daemon answers yes; anywhere else the session waits and `list_sessions` says why.
+- **Sleep.** Quiet sessions hibernate after `hibernateAfterMinutes` (`workspaces.json`); nothing is frozen.
+- **Account limit.** When a turn ends on the account's limit (the `StopFailure` hook with `rate_limit`), the session continues by itself a minute after the reset (`retry_after`, or the reset of the full meter from the status line): "continue" goes in only when its input line is empty.
+- **Restarts.** Stopping the daemon leaves the sessions running in tmux; the next start adopts them, and the ones that are gone come back with `--resume` when opened or messaged.
+- **Tools.** Every tool is on by default (`disabledTools` in `workspaces.json` turns one off for the sessions; the command line can always use them).
+
+`workspacesd tool <name> ['{json}']` runs any tool, like `workspaces-hook tool` on the Mac.
+
 ## Project layout
 
 - `Sources/WorkspacesCore`: models, config, IPC, hook mapping, MCP protocol, sleep policy, HTTP parsing. No UI, fully unit tested.
 - `Sources/Workspaces`: the SwiftUI app, terminal hosting, servers, usage monitor.
 - `Sources/WorkspacesHook`: the hook helper.
-- `Tests/WorkspacesCoreTests`: tests for the core.
+- `Sources/WorkspacesDaemon`, `Sources/WorkspacesDaemonMain`: `workspacesd`, Linux only.
+- `Tests/WorkspacesCoreTests`, `Tests/WorkspacesDaemonTests`: tests for the core (macOS and Linux) and the daemon (Linux).
 
 ## Resumo em português
 
@@ -150,6 +183,8 @@ App nativo para macOS que organiza as sessões do Claude Code por workspace: uma
 - Depois de um /clear, o app guarda a conversa nova assim que ela tem uma mensagem; um hook atrasado da conversa anterior não a traz de volta. Cada troca fica em `conversations.jsonl`.
 - Atualiza sozinho a partir da main do repositório de onde foi compilado: "Procurar atualizações…" no menu do app, e a mesma procura em silêncio ao abrir e a cada 30 min. Achou commit novo, compila em segundo plano num worktree próprio (-j 2, prioridade baixa, só com mais de 30% de memória livre) e mostra "Há uma versão nova do Workspaces" com "Reiniciar agora" e "Depois", dizendo quantas sessões estão trabalhando. Só aplica no clique. Um auxiliar destacado troca o app, guarda o anterior e, se a versão nova não abrir em 20 s, volta a anterior e avisa.
 - Nada muda na sua configuração do Claude Code: tudo vai por `--settings` e `--mcp-config`.
+- No Linux, o `workspacesd` faz o mesmo sem tela: as sessões rodam em tmux, com as mesmas ferramentas MCP, a mesma trava da reciclagem e os mesmos registros. `open_session` escolhe a conta (`CLAUDE_CONFIG_DIR`) e o modelo, `send_message` aperta Enter, `notify` vai para o celular pelo ntfy e a sessão que bate no limite da conta continua sozinha depois que ele reabre. Instala com `./scripts/install-server.sh` (serviço do systemd do usuário).
+- As leituras do limite ficam num arquivo por conta, `limit-readings-<conta>.json`, com a conta de `WORKSPACES_CONTA` (`conta1` se não houver). `workspaces-hook tool <nome> '{json}'` roda uma ferramenta pelo app, para scripts.
 
 Para instalar: `./scripts/build-app.sh --install` e abrir `~/Applications/Workspaces.app`. Depois disso o app se atualiza sozinho. Precisa de macOS 14 ou mais novo, Claude Code instalado e Xcode 16 ou mais novo.
 

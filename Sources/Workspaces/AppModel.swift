@@ -346,6 +346,9 @@ final class AppModel {
         env[ClaudeLaunch.sessionEnvKey] = runtime.id.uuidString
         env[ClaudeLaunch.launchEnvKey] = String(runtime.launch)
         if let home = ProcessInfo.processInfo.environment["WORKSPACES_HOME"] { env["WORKSPACES_HOME"] = home }
+        // Which account the session's usage belongs to, for scripts that read it (the obra's despachante).
+        env[LimitReadingStore.accountEnvKey] = LimitReadingStore.accountName(
+            ProcessInfo.processInfo.environment[LimitReadingStore.accountEnvKey])
         // Straight to Claude when the command is plain words; the login shell only when it is not.
         if let argv = ClaudeLaunch.argv(options), let executable = ShellSupport.resolve(argv[0], path: env["PATH"]) {
             runtime.host.start(executable: executable, arguments: Array(argv.dropFirst()), environment: env, directory: folder)

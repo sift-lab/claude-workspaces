@@ -213,7 +213,7 @@ import Testing
     @Test func clientTalksToSocket() throws {
         let path = "/tmp/ws-test-\(getpid()).sock"
         unlink(path)
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = socket(AF_UNIX, UnixSocket.stream, 0)
         var addr = try UnixSocket.address(for: path)
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
