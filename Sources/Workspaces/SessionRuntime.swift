@@ -46,7 +46,7 @@ final class SessionRuntime: Identifiable {
     /// The conversation the 500 mil alarm already went off for.
     @ObservationIgnored var alarmedConversation: String?
     /// Where a recycle (recycle_self or recycle_session) stands.
-    var recycle: RecycleState?
+    var recycle: RecycleProgress?
 
     @ObservationIgnored let host = TerminalHost()
 
@@ -75,21 +75,10 @@ final class SessionRuntime: Identifiable {
 }
 
 /// A recycle as the sidebar and list_sessions tell it.
-enum RecycleState: Equatable {
-    /// recycle_self: waits for the turn to end.
-    case scheduled
-    /// recycle_session on a hibernated session: waits for it to start.
-    case waking
-    /// "/clear" was sent; waits for the new conversation.
-    case clearing
-    /// The fixed message was typed; waits for it to be sent.
-    case resuming
-    case done(Date)
-    case failed(String)
-
+extension RecycleProgress {
     var inProgress: Bool {
         switch self {
-        case .scheduled, .waking, .clearing, .resuming: return true
+        case .scheduled, .waking, .clearing, .delayed, .resuming, .waitingTurn: return true
         case .done, .failed: return false
         }
     }
@@ -101,7 +90,9 @@ enum RecycleState: Equatable {
         case .scheduled: return "Reciclagem agendada para o fim do turno"
         case .waking: return "Reciclagem: acordando a sessão"
         case .clearing: return "Reciclagem: /clear enviado, esperando a conversa nova"
+        case .delayed: return "Reciclagem: o /clear não respondeu, esperando"
         case .resuming: return "Reciclagem: mensagem de retomada enviada"
+        case .waitingTurn: return "Reciclagem: a retomada espera o turno em curso"
         case .done(let date): return "Reciclada às \(date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)))"
         case .failed(let reason): return "Reciclagem não feita: \(reason)"
         }

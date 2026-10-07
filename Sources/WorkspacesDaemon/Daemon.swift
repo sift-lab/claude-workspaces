@@ -25,10 +25,13 @@ public final class Daemon {
     public struct Helpers {
         public var daemon: String
         public var hook: String
+        /// gh, for the open pull request in a recycle's handoff; nil leaves it out.
+        public var gh: String?
 
-        public init(daemon: String, hook: String) {
+        public init(daemon: String, hook: String, gh: String? = nil) {
             self.daemon = daemon
             self.hook = hook
+            self.gh = gh
         }
     }
 
@@ -83,8 +86,9 @@ public final class Daemon {
         recycler = ServerRecycler(daemon: self, log: RecycleLog(url: paths.recycleLog))
     }
 
-    /// Writes the files Claude Code is pointed at, adopts the sessions still running in tmux and
-    /// marks the rest hibernated (they come back with --resume when opened or messaged).
+    /// Writes the files Claude Code is pointed at, adopts the sessions still running in tmux, marks
+    /// the rest hibernated (they come back with --resume when opened or messaged) and finishes the
+    /// recycles a restart interrupted.
     public func start() throws {
         try writeClaudeFiles()
         for session in sessions where !session.hibernated {
@@ -95,6 +99,7 @@ public final class Daemon {
             }
         }
         saveSessions()
+        recycler.recover()
         scheduleTick()
     }
 

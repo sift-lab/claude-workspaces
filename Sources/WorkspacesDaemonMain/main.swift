@@ -63,7 +63,8 @@ func serve() -> Never {
                     try? handle.close()
                 }
             }
-            let daemon = try Daemon(paths: paths, helpers: .init(daemon: executable.path, hook: hook),
+            let gh = PullRequestLookup.locate(path: ProcessInfo.processInfo.environment["PATH"])
+            let daemon = try Daemon(paths: paths, helpers: .init(daemon: executable.path, hook: hook, gh: gh),
                                     terminal: TmuxTerminal(), scheduler: QueueScheduler(queue: queue), notifier: notifier,
                                     baseEnvironment: ProcessInfo.processInfo.environment)
             try daemon.start()
