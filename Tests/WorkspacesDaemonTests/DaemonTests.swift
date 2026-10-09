@@ -948,6 +948,21 @@ extension JSONValue: ExpressibleByStringLiteral, ExpressibleByBooleanLiteral,
         #expect(!terminal.isRunning("ws-qualquer"))
     }
 
+    /// The output files never go where another user can open them.
+    @Test func refusesAFolderOthersCanEnter() throws {
+        let tmux = try fakeTmux("echo segredo")
+        defer { try? FileManager.default.removeItem(at: tmux) }
+        let open = FileManager.default.temporaryDirectory.appendingPathComponent("aberta-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: open, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        defer { try? FileManager.default.removeItem(at: open) }
+        let result = TmuxTerminal(tmux: tmux.path, folder: open).run(["capture-pane"])
+        #expect(result.status == -1)
+        #expect(result.output.isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: open.path).isEmpty)
+        #expect(TmuxTerminal.isPrivate(TmuxTerminal.privateFolder().path))
+    }
+
     @Test func passesTheInputOn() throws {
         let tmux = try fakeTmux("cat")
         defer { try? FileManager.default.removeItem(at: tmux) }

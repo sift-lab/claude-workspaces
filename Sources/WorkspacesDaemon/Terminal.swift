@@ -32,12 +32,46 @@ public final class TmuxTerminal: SessionTerminal {
     /// Longest a tmux command may take. They answer in milliseconds; past this the client is hung, and every
     /// request to the daemon waits behind it on the single queue.
     let timeout: TimeInterval
+    /// Where each command's output goes for a moment (a capture is the whole Claude screen).
+    let folder: URL
 
-    public init(tmux: String = TmuxTerminal.locate(), width: Int = 200, height: Int = 50, timeout: TimeInterval = 5) {
+    public init(tmux: String = TmuxTerminal.locate(), width: Int = 200, height: Int = 50, timeout: TimeInterval = 5,
+                folder: URL = TmuxTerminal.privateFolder()) {
         self.tmux = tmux
         self.width = width
         self.height = height
         self.timeout = timeout
+        self.folder = folder
+    }
+
+    /// A folder only this user can enter: XDG_RUNTIME_DIR (0700, in memory) under systemd, else
+    /// `workspacesd-<uid>` in the temporary directory. Never the shared /tmp itself: there another user can open
+    /// an output file in the moment before its 0600 takes effect, and read the screen written to it afterwards.
+    public static func privateFolder() -> URL {
+        if let runtime = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"], isPrivate(runtime) {
+            return URL(fileURLWithPath: runtime)
+        }
+        let own = FileManager.default.temporaryDirectory.appendingPathComponent("workspacesd-\(getuid())")
+        try? FileManager.default.createDirectory(at: own, withIntermediateDirectories: false,
+                                                 attributes: [.posixPermissions: 0o700])
+        // Ours from an earlier run with looser permissions: closed again, or every command would be refused.
+        // Someone else's stays as it is, and `isPrivate` refuses it.
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: own.path),
+           attributes[.type] as? FileAttributeType == .typeDirectory,
+           (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: own.path)
+        }
+        return own
+    }
+
+    /// A real directory (not a link), ours, closed to group and others. Checked on every command, so a folder
+    /// someone else made under the same name is refused instead of used.
+    static func isPrivate(_ path: String) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue else { return false }
+        return mode & 0o077 == 0
     }
 
     public static func locate() -> String {
@@ -58,15 +92,16 @@ public final class TmuxTerminal: SessionTerminal {
     /// itself, and the output goes to private files, not pipes, so no process left behind can hold a read open.
     @discardableResult
     func run(_ arguments: [String], input: Data? = nil) -> (status: Int32, output: String, error: String) {
+        guard Self.isPrivate(folder.path) else {
+            return (-1, "", "a pasta da saída do tmux não é só deste usuário: \(folder.path)")
+        }
         let tag = UUID().uuidString.prefix(8)
-        let folder = FileManager.default.temporaryDirectory
         let outURL = folder.appendingPathComponent("workspacesd-tmux-\(tag).out")
         let errURL = folder.appendingPathComponent("workspacesd-tmux-\(tag).err")
         defer {
             try? FileManager.default.removeItem(at: outURL)
             try? FileManager.default.removeItem(at: errURL)
         }
-        // 0600: a capture is the whole Claude screen.
         let privateFile: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
         guard FileManager.default.createFile(atPath: outURL.path, contents: nil, attributes: privateFile),
               FileManager.default.createFile(atPath: errURL.path, contents: nil, attributes: privateFile),
@@ -97,7 +132,8 @@ public final class TmuxTerminal: SessionTerminal {
             }
         }
         guard let status = waitForExit(process, pid: pid) else {
-            signalProcess(pid, SIGKILL)
+            // Only while the child is still ours: once Foundation has collected it, the pid may be someone else's.
+            if process.isRunning { signalProcess(pid, SIGKILL) }
             reap(pid)
             return (Self.timedOut, "", "tmux \(arguments.first ?? "") não terminou em \(Int(timeout)) s")
         }
