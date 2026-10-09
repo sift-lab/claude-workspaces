@@ -76,13 +76,23 @@ func serve() -> Never {
     let listener = IPCListener(path: AppPaths.socketFile.path, queue: queue) { daemon.handle($0) }
     do { try listener.start() } catch { fail("workspacesd não abriu o socket: \(error)", code: 1) }
     signal(SIGPIPE, SIG_IGN)
+    // Received on its own queue: on the daemon's queue a hung command also held the stop, and systemd waited its
+    // 90 s and killed the process (09/10). The exit itself still goes through the daemon's queue, between two
+    // operations, so a launch never stops halfway; the deadline is for a queue that is stuck.
+    let signalQueue = DispatchQueue(label: "workspacesd.signals")
     for sig in [SIGTERM, SIGINT] {
         signal(sig, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: sig, queue: queue)
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
         source.setEventHandler {
-            // The sessions stay in tmux; the next start adopts them.
-            listener.stop()
-            exit(0)
+            // The sessions stay in tmux; the next start adopts them. `listener.stop()` does not touch the queue.
+            queue.async {
+                listener.stop()
+                exit(0)
+            }
+            signalQueue.asyncAfter(deadline: .now() + 20) {
+                listener.stop()
+                exit(0)
+            }
         }
         source.resume()
         signalSources.append(source)

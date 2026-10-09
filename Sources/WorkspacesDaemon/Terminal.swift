@@ -29,11 +29,15 @@ public final class TmuxTerminal: SessionTerminal {
     let tmux: String
     let width: Int
     let height: Int
+    /// Longest a tmux command may take. They answer in milliseconds; past this the client is hung, and every
+    /// request to the daemon waits behind it on the single queue.
+    let timeout: TimeInterval
 
-    public init(tmux: String = TmuxTerminal.locate(), width: Int = 200, height: Int = 50) {
+    public init(tmux: String = TmuxTerminal.locate(), width: Int = 200, height: Int = 50, timeout: TimeInterval = 5) {
         self.tmux = tmux
         self.width = width
         self.height = height
+        self.timeout = timeout
     }
 
     public static func locate() -> String {
@@ -44,26 +48,89 @@ public final class TmuxTerminal: SessionTerminal {
     /// "=name": the exact session, never a prefix of another one.
     private func target(_ name: String) -> String { "=\(name):" }
 
+    /// The status of a command that did not end within `timeout`. Not "no such session": the session may be fine.
+    public static let timedOut: Int32 = -2
+
+    /// Runs one tmux command on the daemon's queue, and never waits past `timeout`.
+    ///
+    /// On 09/10 (11h54 and 15h13) the daemon hung for good inside `waitUntilExit`: the client had exited, sat
+    /// unreaped as `[tmux: client] <defunct>`, and Foundation never noticed. So the wait here also reaps the child
+    /// itself, and the output goes to private files, not pipes, so no process left behind can hold a read open.
     @discardableResult
     func run(_ arguments: [String], input: Data? = nil) -> (status: Int32, output: String, error: String) {
+        let tag = UUID().uuidString.prefix(8)
+        let folder = FileManager.default.temporaryDirectory
+        let outURL = folder.appendingPathComponent("workspacesd-tmux-\(tag).out")
+        let errURL = folder.appendingPathComponent("workspacesd-tmux-\(tag).err")
+        defer {
+            try? FileManager.default.removeItem(at: outURL)
+            try? FileManager.default.removeItem(at: errURL)
+        }
+        // 0600: a capture is the whole Claude screen.
+        let privateFile: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
+        guard FileManager.default.createFile(atPath: outURL.path, contents: nil, attributes: privateFile),
+              FileManager.default.createFile(atPath: errURL.path, contents: nil, attributes: privateFile),
+              let out = try? FileHandle(forWritingTo: outURL),
+              let err = try? FileHandle(forWritingTo: errURL) else {
+            return (-1, "", "não consegui criar a saída do tmux em \(folder.path)")
+        }
+        defer {
+            try? out.close()
+            try? err.close()
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = arguments
-        let out = Pipe(), err = Pipe()
         process.standardOutput = out
         process.standardError = err
         let inPipe = input.map { _ in Pipe() }
         process.standardInput = inPipe ?? FileHandle.nullDevice
         do { try process.run() } catch { return (-1, "", "\(error)") }
+        let pid = process.processIdentifier
         if let inPipe, let input {
-            inPipe.fileHandleForWriting.write(input)
-            try? inPipe.fileHandleForWriting.close()
+            // Off the queue, so a client that never reads cannot hold the wait below; and the throwing write, so
+            // one that already left (EPIPE) cannot take the daemon down.
+            let writer = inPipe.fileHandleForWriting
+            DispatchQueue.global().async {
+                try? writer.write(contentsOf: input)
+                try? writer.close()
+            }
         }
-        let output = out.fileHandleForReading.readDataToEndOfFile()
-        let error = err.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return (process.terminationStatus, String(decoding: output, as: UTF8.self),
+        guard let status = waitForExit(process, pid: pid) else {
+            signalProcess(pid, SIGKILL)
+            reap(pid)
+            return (Self.timedOut, "", "tmux \(arguments.first ?? "") não terminou em \(Int(timeout)) s")
+        }
+        let output = (try? Data(contentsOf: outURL)) ?? Data()
+        let error = (try? Data(contentsOf: errURL)) ?? Data()
+        return (status, String(decoding: output, as: UTF8.self),
                 String(decoding: error, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// After the SIGKILL: collects the child, so it does not stay `<defunct>` if Foundation misses this exit too.
+    /// Bounded, never a blocking `waitpid`, so a child that will not die cannot hold the queue.
+    private func reap(_ pid: Int32) {
+        var status: Int32 = 0
+        for _ in 0..<200 {
+            let reaped = waitpid(pid, &status, WNOHANG)
+            if reaped == pid || reaped == -1 { return }  // -1: Foundation already collected it
+            usleep(5_000)
+        }
+    }
+
+    /// The exit status, from Foundation or from reaping the child here; nil past the timeout.
+    private func waitForExit(_ process: Process, pid: Int32) -> Int32? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !process.isRunning { return process.terminationStatus }
+            var status: Int32 = 0
+            if waitpid(pid, &status, WNOHANG) == pid {
+                // WIFEXITED and WEXITSTATUS are C macros Swift does not import.
+                return status & 0x7f == 0 ? (status >> 8) & 0xff : -1
+            }
+            usleep(5_000)
+        }
+        return nil
     }
 
     public func start(name: String, folder: String, environment: [String: String], argv: [String]) throws {
@@ -78,7 +145,10 @@ public final class TmuxTerminal: SessionTerminal {
     }
 
     public func isRunning(_ name: String) -> Bool {
-        run(["has-session", "-t", "=\(name)"]).status == 0
+        // A hung tmux says nothing about the session. Taken as gone, it would hibernate a live session, or launch
+        // a second one over it.
+        let status = run(["has-session", "-t", "=\(name)"]).status
+        return status == 0 || status == Self.timedOut
     }
 
     public func paste(_ name: String, _ text: String) {
@@ -113,6 +183,11 @@ public final class TmuxTerminal: SessionTerminal {
     public func kill(_ name: String) {
         run(["kill-session", "-t", "=\(name)"])
     }
+}
+
+/// The C `kill`, which `TmuxTerminal.kill(_:)` hides inside the class.
+private func signalProcess(_ pid: Int32, _ signal: Int32) {
+    _ = kill(pid, signal)
 }
 
 /// Processes under Claude, read from /proc: a shell there means a command is running.

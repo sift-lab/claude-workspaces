@@ -901,3 +901,58 @@ extension JSONValue: ExpressibleByStringLiteral, ExpressibleByBooleanLiteral,
         #expect(reply.text.contains("estava hibernando"))
     }
 }
+
+// MARK: The tmux process (not a session)
+
+/// `TmuxTerminal.run` with a fake "tmux": a script that does what hung the daemon on 09/10.
+@Suite struct TmuxRunTests {
+    /// A temporary executable with the given body; the caller removes it.
+    func fakeTmux(_ body: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("fake-tmux-\(UUID().uuidString.prefix(8))")
+        try Data("#!/bin/sh\n\(body)\n".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    /// The client exits while a child it left behind still holds the inherited output.
+    @Test func returnsWhenAChildKeepsTheOutputOpen() throws {
+        let tmux = try fakeTmux("sleep 4 &\necho pronto")
+        defer { try? FileManager.default.removeItem(at: tmux) }
+        let start = Date()
+        let result = TmuxTerminal(tmux: tmux.path).run(["new-session"])
+        #expect(Date().timeIntervalSince(start) < 3)
+        #expect(result.status == 0)
+        #expect(result.output == "pronto\n")
+    }
+
+    @Test func givesUpOnAClientThatNeverEnds() throws {
+        let tmux = try fakeTmux("sleep 30")
+        defer { try? FileManager.default.removeItem(at: tmux) }
+        let terminal = TmuxTerminal(tmux: tmux.path, timeout: 1)
+        let start = Date()
+        let result = terminal.run(["kill-session"])
+        #expect(Date().timeIntervalSince(start) < 5)
+        #expect(result.status == TmuxTerminal.timedOut)
+        #expect(result.error.contains("não terminou"))
+        // A hung tmux is not a missing session: taken as missing, the daemon would launch a second Claude.
+        #expect(terminal.isRunning("ws-qualquer"))
+    }
+
+    @Test func keepsTheExitStatusAndTheError() throws {
+        let tmux = try fakeTmux("echo 'sem sessão' >&2\nexit 1")
+        defer { try? FileManager.default.removeItem(at: tmux) }
+        let terminal = TmuxTerminal(tmux: tmux.path)
+        let result = terminal.run(["has-session"])
+        #expect(result.status == 1)
+        #expect(result.error == "sem sessão")
+        #expect(!terminal.isRunning("ws-qualquer"))
+    }
+
+    @Test func passesTheInputOn() throws {
+        let tmux = try fakeTmux("cat")
+        defer { try? FileManager.default.removeItem(at: tmux) }
+        let result = TmuxTerminal(tmux: tmux.path).run(["load-buffer", "-"], input: Data("olá".utf8))
+        #expect(result.status == 0)
+        #expect(result.output == "olá")
+    }
+}
