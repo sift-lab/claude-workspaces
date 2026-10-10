@@ -2,8 +2,9 @@ import AppKit
 import Observation
 import WorkspacesCore
 
-/// Tokens the sessions spend and the account's limit. The transcripts are read in the background,
+/// Tokens the sessions spend and each account's limit. The transcripts are read in the background,
 /// from where each one stopped; the meter comes from the status line Claude Code refreshes.
+/// The ring, the menu bar and Consumo show one account at a time, `meterAccount`.
 @MainActor
 @Observable
 final class TokenMonitor {
@@ -23,46 +24,73 @@ final class TokenMonitor {
         var forecast: Forecast
     }
 
-    private(set) var overview: TokenOverview?
+    /// One account's meter: the last readings and the spend of its sessions.
+    struct Meter: Equatable {
+        var overview: TokenOverview?
+        var fiveHour: MeterReading?
+        var sevenDay: MeterReading?
+        /// Weight that fills each window, calibrated from the meter's readings.
+        var windowFull = LimitMath.defaultWindowWeight
+        var weekFull = LimitMath.defaultWeekWeight
+    }
+
+    private struct Floors {
+        var at: Date
+        var window: Double
+        var week: Double
+    }
+
+    /// By account name.
+    private(set) var meters: [String: Meter] = [:]
+    /// The account the ring, the menu bar and Consumo show: the one of the session on screen.
+    var meterAccount = LimitReadingStore.defaultAccount
     /// By Claude's session id; only the sessions open in the app.
     private(set) var sessions: [String: SessionTokens] = [:]
-    private(set) var fiveHour: MeterReading?
-    private(set) var sevenDay: MeterReading?
     private(set) var exact: [String: ExactContext] = [:]
-    /// Weight that fills each window, calibrated from the meter's readings.
-    private(set) var windowFull = LimitMath.defaultWindowWeight
-    private(set) var weekFull = LimitMath.defaultWeekWeight
     /// The Consumo window shows this session in full.
     var focused: UUID?
 
+    private var meter: Meter { meters[meterAccount] ?? Meter() }
+    var overview: TokenOverview? { meter.overview }
+    var fiveHour: MeterReading? { meter.fiveHour }
+    var sevenDay: MeterReading? { meter.sevenDay }
+    var windowFull: Double { meter.windowFull }
+    var weekFull: Double { meter.weekFull }
+
     @ObservationIgnored weak var model: AppModel?
     @ObservationIgnored private let queue = DispatchQueue(label: "workspaces.tokens", qos: .utility)
+    /// Writes go on their own queue: the first scan of two weeks of transcripts would hold them.
+    @ObservationIgnored private let files = DispatchQueue(label: "workspaces.tokens.files", qos: .utility)
     @ObservationIgnored private let ledger = TokenLedger()
-    @ObservationIgnored private let scanner: TranscriptScanner
+    /// One per projects folder the accounts read, symlinks resolved; Claude Code's own always.
+    @ObservationIgnored private var scanners: [String: TranscriptScanner] = [:]
     @ObservationIgnored private var busy = false
     @ObservationIgnored private var again = false
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var soon: DispatchWorkItem?
-    @ObservationIgnored private var readings5: [MeterReading] = []
-    @ObservationIgnored private var readings7: [MeterReading] = []
-    @ObservationIgnored private var alertedWindow: Date?
+    /// Each account's readings, loaded on first use.
+    @ObservationIgnored private var readings: [String: LimitReadings] = [:]
+    @ObservationIgnored private var alertedWindow: [String: Date] = [:]
     /// The heaviest 5 h and 7 days seen locally; sorting every call is too much for every tick.
-    @ObservationIgnored private var floors: (at: Date, window: Double, week: Double)?
-    @ObservationIgnored private var pendingSave: DispatchWorkItem?
+    @ObservationIgnored private var floors: [String: Floors] = [:]
+    @ObservationIgnored private var pendingSave: [String: DispatchWorkItem] = [:]
+    /// Which account each conversation ran in and since when, as the sessions reported it. Kept on
+    /// disk, so the spend stays with its account after a /clear, a close or a restart; a
+    /// conversation the app never ran is the default account's.
+    @ObservationIgnored private var owners = ConversationAccounts()
+    @ObservationIgnored private var pendingOwnersSave: DispatchWorkItem?
 
     static let contextDefault = 1_000_000
     private nonisolated static let horizon: TimeInterval = 15 * 86_400
 
-    init() {
-        let home = URL(fileURLWithPath: NSHomeDirectory())
-        scanner = TranscriptScanner(root: home.appendingPathComponent(".claude/projects", isDirectory: true))
-        loadReadings()
-        fiveHour = readings5.last
-        sevenDay = readings7.last
-    }
-
     func start(model: AppModel) {
         self.model = model
+        meterAccount = model.config.mainAccount.name
+        if let data = FileManager.default.contents(atPath: Self.ownersFile.path),
+           let saved = try? JSONDecoder().decode(ConversationAccounts.self, from: data) {
+            owners = saved
+            owners.prune(before: Date().addingTimeInterval(-Self.horizon - 86_400))
+        }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -74,25 +102,33 @@ final class TokenMonitor {
 
     func receive(_ reading: StatusLineReading, from runtime: SessionRuntime) {
         let now = Date()
-        if let id = reading.sessionId ?? runtime.claudeSessionId, let tokens = reading.contextTokens, tokens > 0 {
-            exact[id] = ExactContext(tokens: tokens, size: reading.contextSize, at: now)
-            model?.checkContextAlarms()
+        let account = self.account(of: runtime)
+        if let id = reading.sessionId ?? runtime.claudeSessionId {
+            record(id, account: account, at: now)
+            if let tokens = reading.contextTokens, tokens > 0 {
+                exact[id] = ExactContext(tokens: tokens, size: reading.contextSize, at: now)
+                model?.checkContextAlarms()
+            }
         }
+        var saved = loadedReadings(account)
+        var meter = meters[account] ?? Meter()
         var changed = false
         if let r = reading.fiveHour {
-            var list = readings5
-            if record(r, in: &list) { fiveHour = r }
-            changed = changed || list.count != readings5.count || list.last?.percent != readings5.last?.percent
-            readings5 = list
+            var list = saved.fiveHour
+            if record(r, in: &list) { meter.fiveHour = r }
+            changed = changed || list.count != saved.fiveHour.count || list.last?.percent != saved.fiveHour.last?.percent
+            saved.fiveHour = list
         }
         if let r = reading.sevenDay {
-            var list = readings7
-            if record(r, in: &list) { sevenDay = r }
-            changed = changed || list.count != readings7.count || list.last?.percent != readings7.last?.percent
-            readings7 = list
+            var list = saved.sevenDay
+            if record(r, in: &list) { meter.sevenDay = r }
+            changed = changed || list.count != saved.sevenDay.count || list.last?.percent != saved.sevenDay.last?.percent
+            saved.sevenDay = list
         }
+        readings[account] = saved
+        if meters[account] != meter { meters[account] = meter }
         // Only a new value is written; the same value seen again just moves its time in memory.
-        if changed { saveReadings() }
+        if changed { saveReadings(account) }
         // A new answer just landed somewhere: read it soon, not at the next tick.
         soon?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.refresh() }
@@ -128,50 +164,77 @@ final class TokenMonitor {
         if busy { again = true; return }
         busy = true
         let now = Date()
-        let windowStart = self.windowStart(now), weekStart = self.weekStart(now)
-        let ids = Set(model.sessions.compactMap(\.claudeSessionId))
+        // Only a session that runs knows its account; one not started yet would claim the default's.
+        for runtime in model.sessions {
+            guard let account = runtime.account else { continue }
+            for id in [runtime.conversation.current, runtime.conversation.resumable].compactMap({ $0 }) { record(id, account: account, at: now) }
+        }
+        var ids: [String: String] = [:]
+        for runtime in model.sessions { if let id = runtime.claudeSessionId { ids[id] = account(of: runtime) } }
         let config = model.config
         let home = NSHomeDirectory()
         let today = Calendar.current.startOfDay(for: now)
         let from = min(today, now.addingTimeInterval(-6 * 3600))
-        let r5 = readings5, r7 = readings7
-        let known = floors.flatMap { now.timeIntervalSince($0.at) < 600 ? $0 : nil }
-        let ledger = self.ledger, scanner = self.scanner
+        let main = config.mainAccount.name
+        let split = config.accounts.count > 1
+        let owners = self.owners
+        struct Job { var account: String; var windowStart: Date; var weekStart: Date; var r5: [MeterReading]; var r7: [MeterReading]; var floors: Floors? }
+        let jobs = config.accounts.map { account -> Job in
+            let saved = loadedReadings(account.name)
+            return Job(account: account.name, windowStart: windowStart(now, account: account.name), weekStart: weekStart(now, account: account.name),
+                       r5: saved.fiveHour, r7: saved.sevenDay, floors: floors[account.name].flatMap { now.timeIntervalSince($0.at) < 600 ? $0 : nil })
+        }
+        let starts = Dictionary(jobs.map { ($0.account, $0.windowStart) }, uniquingKeysWith: { a, _ in a })
+        let ledger = self.ledger, scanners = Array(updatedScanners(config).values)
         queue.async { [weak self] in
-            scanner.scan(into: ledger, since: now.addingTimeInterval(-Self.horizon))
+            for scanner in scanners { scanner.scan(into: ledger, since: now.addingTimeInterval(-Self.horizon)) }
             ledger.prune(before: now.addingTimeInterval(-Self.horizon - 86_400))
-            let overview = ledger.overview(now: now, windowStart: windowStart, weekStart: weekStart) { cwd in
-                cwd.flatMap { config.project(containing: $0, home: home)?.workspace.name } ?? "Outros"
-            }
             var sessions: [String: SessionTokens] = [:]
-            for id in ids {
+            for (id, account) in ids {
+                let windowStart = starts[account] ?? now.addingTimeInterval(-5 * 3600)
                 if let s = ledger.session(id, from: from, windowStart: windowStart, now: now) { sessions[id] = s }
             }
-            // Before the meter calibrates, a window holds at least the heaviest stretch seen locally.
-            let seen = now.addingTimeInterval(-Self.horizon)
-            let floors = known ?? (at: now,
-                                   window: max(LimitMath.defaultWindowWeight, ledger.heaviest(span: 5 * 3600, from: seen, to: now)),
-                                   week: max(LimitMath.defaultWeekWeight, ledger.heaviest(span: 7 * 86_400, from: seen, to: now)))
-            let floor5 = floors.window, floor7 = floors.week
-            let full5 = LimitMath.fullWeight(readings: r5, spent: { ledger.weight(from: $0, to: $1) }, fallback: floor5)
-            let full7 = LimitMath.fullWeight(readings: r7, minimumDelta: 3, spent: { ledger.weight(from: $0, to: $1) }, fallback: floor7)
+            var results: [(account: String, overview: TokenOverview, full5: Double, full7: Double, floors: Floors)] = []
+            for job in jobs {
+                // With one account every conversation is its own, even one no session reported.
+                let mask = split ? ledger.filter {
+                    owners.changes($0, for: job.account) ?? [LedgerFilter.Change(from: -.infinity, counts: job.account == main)]
+                } : nil
+                let overview = ledger.overview(now: now, windowStart: job.windowStart, weekStart: job.weekStart, only: mask) { cwd in
+                    cwd.flatMap { config.project(containing: $0, home: home)?.workspace.name } ?? "Outros"
+                }
+                // Before the meter calibrates, a window holds at least the heaviest stretch seen locally.
+                let seen = now.addingTimeInterval(-Self.horizon)
+                let floors = job.floors ?? Floors(
+                    at: now,
+                    window: max(LimitMath.defaultWindowWeight, ledger.heaviest(span: 5 * 3600, from: seen, to: now, only: mask)),
+                    week: max(LimitMath.defaultWeekWeight, ledger.heaviest(span: 7 * 86_400, from: seen, to: now, only: mask)))
+                let full5 = LimitMath.fullWeight(readings: job.r5, spent: { ledger.weight(from: $0, to: $1, only: mask) }, fallback: floors.window)
+                let full7 = LimitMath.fullWeight(readings: job.r7, minimumDelta: 3, spent: { ledger.weight(from: $0, to: $1, only: mask) },
+                                                 fallback: floors.week)
+                results.append((job.account, overview, full5, full7, floors))
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    self.floors = floors
-                    self.publish(overview: overview, sessions: sessions, full5: full5, full7: full7)
+                    for r in results { self.floors[r.account] = r.floors }
+                    self.publish(results.map { ($0.account, $0.overview, $0.full5, $0.full7) }, sessions: sessions)
                 }
             }
         }
     }
 
-    private func publish(overview: TokenOverview, sessions: [String: SessionTokens], full5: Double, full7: Double) {
-        if self.overview != overview { self.overview = overview }
+    private func publish(_ results: [(account: String, overview: TokenOverview, full5: Double, full7: Double)], sessions: [String: SessionTokens]) {
+        for r in results {
+            var meter = meters[r.account] ?? Meter()
+            meter.overview = r.overview
+            meter.windowFull = r.full5
+            meter.weekFull = r.full7
+            if meters[r.account] != meter { meters[r.account] = meter }
+        }
         if self.sessions != sessions { self.sessions = sessions }
-        if windowFull != full5 { windowFull = full5 }
-        if weekFull != full7 { weekFull = full7 }
         busy = false
-        checkAlert()
+        for r in results { checkAlert(r.account) }
         model?.checkContextAlarms()
         if again {
             again = false
@@ -179,15 +242,67 @@ final class TokenMonitor {
         }
     }
 
+    /// Keeps which account the session's conversations run in from now on: called when it starts
+    /// and when its conversation changes, so a switch counts from the moment it happened.
+    func note(_ runtime: SessionRuntime) {
+        guard let account = runtime.account else { return }
+        let now = Date()
+        for id in [runtime.conversation.current, runtime.conversation.resumable].compactMap({ $0 }) { record(id, account: account, at: now) }
+    }
+
+    private func record(_ conversation: String, account: String, at date: Date) {
+        guard owners.record(conversation, account: account, at: date) else { return }
+        pendingOwnersSave?.cancel()
+        let saved = owners
+        let work = DispatchWorkItem {
+            try? FileManager.default.createDirectory(at: AppPaths.supportDirectory, withIntermediateDirectories: true)
+            try? JSONEncoder().encode(saved).write(to: Self.ownersFile, options: .atomic)
+        }
+        pendingOwnersSave = work
+        files.asyncAfter(deadline: .now() + 2, execute: work)
+    }
+
+    /// Writes now what waits to be written, when the app quits.
+    func flush() {
+        for work in Array(pendingSave.values) + [pendingOwnersSave].compactMap({ $0 }) where !work.isCancelled {
+            // A cancelled item no longer runs, so it is run first.
+            files.sync { work.perform() }
+            work.cancel()
+        }
+        pendingSave = [:]
+        pendingOwnersSave = nil
+    }
+
+    private static var ownersFile: URL { AppPaths.supportDirectory.appendingPathComponent("conversation-accounts.json") }
+
+    /// The account a session's spend and readings belong to: the one its process runs in.
+    func account(of runtime: SessionRuntime) -> String {
+        runtime.account ?? model?.config.mainAccount.name ?? LimitReadingStore.defaultAccount
+    }
+
+    /// Claude Code's own projects folder, plus the one of each account that keeps its own.
+    private func updatedScanners(_ config: AppConfig) -> [String: TranscriptScanner] {
+        let env = model?.toolEnvironment ?? ProcessInfo.processInfo.environment
+        var roots = ["\(NSHomeDirectory())/.claude/projects"]
+        roots += config.accounts.map { $0.projectsDirectory(environment: env) }
+        for root in roots {
+            let key = AccountFolder.resolved(root)
+            if scanners[key] == nil, FileManager.default.fileExists(atPath: key) {
+                scanners[key] = TranscriptScanner(root: URL(fileURLWithPath: key, isDirectory: true))
+            }
+        }
+        return scanners
+    }
+
     // MARK: Windows
 
-    func windowStart(_ now: Date) -> Date {
-        if let r = fiveHour, r.resetsAt > now { return r.resetsAt.addingTimeInterval(-5 * 3600) }
+    func windowStart(_ now: Date, account: String? = nil) -> Date {
+        if let r = meters[account ?? meterAccount]?.fiveHour, r.resetsAt > now { return r.resetsAt.addingTimeInterval(-5 * 3600) }
         return now.addingTimeInterval(-5 * 3600)
     }
 
-    func weekStart(_ now: Date) -> Date {
-        if let r = sevenDay, r.resetsAt > now { return r.resetsAt.addingTimeInterval(-7 * 86_400) }
+    func weekStart(_ now: Date, account: String? = nil) -> Date {
+        if let r = meters[account ?? meterAccount]?.sevenDay, r.resetsAt > now { return r.resetsAt.addingTimeInterval(-7 * 86_400) }
         return now.addingTimeInterval(-7 * 86_400)
     }
 
@@ -201,11 +316,14 @@ final class TokenMonitor {
         return a.weight + (b.weight - a.weight) * f
     }
 
-    var fiveHourLimit: Limit? {
-        guard let o = overview else { return nil }
-        let now = o.now
+    var fiveHourLimit: Limit? { fiveHourLimit(meter) }
+    var weekLimit: Limit? { weekLimit(meter) }
+
+    private func fiveHourLimit(_ meter: Meter) -> Limit? {
+        guard let o = meter.overview else { return nil }
+        let now = o.now, windowFull = meter.windowFull
         let rate = o.weightLastHour / windowFull * 100
-        if let r = fiveHour, r.resetsAt > now {
+        if let r = meter.fiveHour, r.resetsAt > now {
             // The meter moves only when some session answers; the transcripts fill the gap since.
             let since = max(0, o.weightInWindow - weight(in: o.windowCurve, start: o.windowStart, at: r.time))
             let used = r.percent + since / windowFull * 100
@@ -218,13 +336,13 @@ final class TokenMonitor {
                      forecast: LimitMath.forecast(used: used, resetsAt: reset, rate: rate, now: now))
     }
 
-    var weekLimit: Limit? {
-        guard let o = overview else { return nil }
-        let now = o.now
+    private func weekLimit(_ meter: Meter) -> Limit? {
+        guard let o = meter.overview else { return nil }
+        let now = o.now, weekFull = meter.weekFull
         let used: Double
         let reset: Date
         let estimated: Bool
-        if let r = sevenDay, r.resetsAt > now {
+        if let r = meter.sevenDay, r.resetsAt > now {
             let since = max(0, o.weightInWeek - weight(in: o.weekCurve, start: o.weekStart, at: r.time))
             used = r.percent + since / weekFull * 100
             reset = r.resetsAt
@@ -248,6 +366,11 @@ final class TokenMonitor {
     var windowAtRisk: Bool {
         guard let limit = fiveHourLimit, !limit.estimated else { return false }
         return limit.forecast.runsOutAt != nil
+    }
+
+    /// The accounts in the app and the 5 h window of each, for the picker beside the meter.
+    var accountLimits: [(account: String, limit: Limit?)] {
+        (model?.config.accounts ?? []).map { ($0.name, fiveHourLimit(meters[$0.name] ?? Meter())) }
     }
 
     // MARK: One session
@@ -285,11 +408,11 @@ final class TokenMonitor {
         return now.addingTimeInterval(room / s.growthPerHour * 3600)
     }
 
-    /// The session spending the most right now, among the open ones.
+    /// The session spending the most right now, among the open ones of the account shown.
     var hottest: (runtime: SessionRuntime, rate: Double)? {
         guard let model else { return nil }
         let ranked = model.sessions.compactMap { runtime -> (SessionRuntime, Double)? in
-            guard let s = tokens(runtime), s.weightLastHour > 0 else { return nil }
+            guard account(of: runtime) == meterAccount, let s = tokens(runtime), s.weightLastHour > 0 else { return nil }
             return (runtime, windowPercent(s.weightLastHour))
         }
         return ranked.max { $0.1 < $1.1 }.map { (runtime: $0.0, rate: $0.1) }
@@ -297,20 +420,23 @@ final class TokenMonitor {
 
     // MARK: Alert
 
-    /// Once per window: the pace of the last ten minutes empties it before it resets.
-    private func checkAlert() {
-        guard let o = overview, let limit = fiveHourLimit, !limit.estimated, limit.used >= 10, limit.used < 100 else { return }
+    /// Once per window and account: the pace of the last ten minutes empties it before it resets.
+    private func checkAlert(_ account: String) {
+        let meter = meters[account] ?? Meter()
+        guard let o = meter.overview, let limit = fiveHourLimit(meter), !limit.estimated, limit.used >= 10, limit.used < 100 else { return }
         let now = o.now
-        let rate = windowPercent(o.weightLast10) * 6
+        let rate = o.weightLast10 / meter.windowFull * 100 * 6
         guard rate > 0 else { return }
         let runsOut = now.addingTimeInterval((100 - limit.used) / rate * 3600)
         guard runsOut < limit.resetsAt.addingTimeInterval(-10 * 60), runsOut.timeIntervalSince(now) < 90 * 60 else { return }
-        guard alertedWindow.map({ abs($0.timeIntervalSince(limit.resetsAt)) > 120 }) ?? true else { return }
-        alertedWindow = limit.resetsAt
+        guard alertedWindow[account].map({ abs($0.timeIntervalSince(limit.resetsAt)) > 120 }) ?? true else { return }
+        alertedWindow[account] = limit.resetsAt
 
         var body = "Só renova às \(TokenFormat.clock(limit.resetsAt))."
+        if let model, model.config.accounts.count > 1 { body = "Conta \(model.accountLabel(account)). " + body }
         var target = UUID()
-        if let model, let top = model.sessions.compactMap({ r -> (SessionRuntime, SessionTokens)? in tokens(r).map { (r, $0) } })
+        if let model, let top = model.sessions.filter({ self.account(of: $0) == account })
+            .compactMap({ r -> (SessionRuntime, SessionTokens)? in tokens(r).map { (r, $0) } })
             .max(by: { $0.1.weightLast10 < $1.1.weightLast10 }), o.weightLast10 > 0 {
             let share = Int((top.1.weightLast10 / o.weightLast10 * 100).rounded())
             let project = model.project(top.0.projectId)?.project.name ?? ""
@@ -324,26 +450,29 @@ final class TokenMonitor {
 
     // MARK: Files
 
-    /// Every session of the app runs in one account: the one in `WORKSPACES_CONTA`, or conta1.
-    /// Until its own file exists, the single file of earlier versions is read.
-    private let store = LimitReadingStore(account: LimitReadingStore.accountName(
-        ProcessInfo.processInfo.environment[LimitReadingStore.accountEnvKey]))
-
-    private func loadReadings() {
-        let saved = store.load(legacy: true)
-        readings5 = saved.fiveHour
-        readings7 = saved.sevenDay
+    /// An account's readings, read from `limit-readings-<account>.json` the first time. Until the
+    /// account of Claude Code's own folder has its file, the single file of earlier versions is read.
+    private func loadedReadings(_ account: String) -> LimitReadings {
+        if let saved = readings[account] { return saved }
+        let own = model?.config.account(named: account).map { $0.configDirectory == nil } ?? false
+        let saved = LimitReadingStore(account: account).load(legacy: own)
+        readings[account] = saved
+        var meter = meters[account] ?? Meter()
+        meter.fiveHour = saved.fiveHour.last
+        meter.sevenDay = saved.sevenDay.last
+        if meters[account] != meter { meters[account] = meter }
+        return saved
     }
 
-    private func saveReadings() {
-        pendingSave?.cancel()
-        let saved = LimitReadings(fiveHour: readings5, sevenDay: readings7)
-        let store = self.store
+    private func saveReadings(_ account: String) {
+        pendingSave[account]?.cancel()
+        let saved = readings[account] ?? LimitReadings()
+        let store = LimitReadingStore(account: account)
         let work = DispatchWorkItem {
             try? store.save(saved)
         }
-        pendingSave = work
-        queue.asyncAfter(deadline: .now() + 2, execute: work)
+        pendingSave[account] = work
+        files.asyncAfter(deadline: .now() + 2, execute: work)
     }
 }
 

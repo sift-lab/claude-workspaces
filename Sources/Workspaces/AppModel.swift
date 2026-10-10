@@ -87,6 +87,7 @@ final class AppModel {
         LoginEnvironment.capture { [weak self] env in
             self?.loginEnvironment = env
             self?.runPendingStarts()
+            self?.refreshAccountEmails()
         }
         slowTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.slowTick() }
@@ -104,6 +105,7 @@ final class AppModel {
 
     func shutdown() {
         flushSave()
+        tokens.flush()
         for session in sessions { session.host.terminate() }
         server?.stop()
         mcpServer?.stop()
@@ -257,8 +259,9 @@ final class AppModel {
 
     // MARK: Sessions
 
+    /// `account` names the session's own account; nil follows the workspace.
     @discardableResult
-    func newSession(projectId: UUID, worktree: String? = nil, prompt: String? = nil) -> SessionRuntime? {
+    func newSession(projectId: UUID, worktree: String? = nil, prompt: String? = nil, account: String? = nil) -> SessionRuntime? {
         guard let (workspace, project) = project(projectId) else { return nil }
         let id = UUID()
         var worktreeName = worktree
@@ -266,7 +269,7 @@ final class AppModel {
             worktreeName = "ws-" + String(id.uuidString.lowercased().prefix(6))
         }
         let label = worktreeName ?? Git.branch(at: project.path) ?? project.name
-        let saved = SavedSession(id: id, label: label, worktree: worktreeName)
+        let saved = SavedSession(id: id, label: label, worktree: worktreeName, account: config.account(named: account)?.name)
         updateProject(projectId) { $0.savedSessions.append(saved) }
         return launch(saved: saved, project: project, workspaceId: workspace.id, prompt: prompt)
     }
@@ -293,7 +296,9 @@ final class AppModel {
         return runtime
     }
 
-    private func start(_ runtime: SessionRuntime, project: Project, prompt: String?) {
+    /// `synced`: the conversation was already brought to the account's folder in this start.
+    private func start(_ runtime: SessionRuntime, project: Project, prompt: String?, synced: Bool = false) {
+        guard !runtime.preparingStart else { return }
         guard let loginEnvironment, mcpSettled else {
             runtime.status = .working
             pendingStarts.append { [weak self, weak runtime] in
@@ -302,12 +307,35 @@ final class AppModel {
             }
             return
         }
+        let account = self.account(for: runtime)
         if runtime.isTerminal {
             let folder = runtime.cwd.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil } ?? project.path
-            startShell(runtime, in: folder, environment: loginEnvironment)
+            // A `claude` typed in it runs in the workspace's account.
+            startShell(runtime, in: folder, environment: account.environment(loginEnvironment))
             return
         }
         let resumeId = runtime.conversation.resumable
+        // The conversation may have been written last in another account's folder: its freshest
+        // transcript is copied to this one first, off the main thread, as it can be large.
+        if !synced, let resumeId,
+           let copy = TranscriptSync.needed(resumeId, target: account.projectsDirectory(environment: loginEnvironment),
+                                            folders: config.projectsDirectories(environment: loginEnvironment)) {
+            runtime.preparingStart = true
+            runtime.status = .working
+            runtime.host.show("\u{1b}[2mTrazendo a conversa para a conta \(accountLabel(account.name))...\u{1b}[0m\r\n")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak runtime] in
+                let failure: String? = { do { try TranscriptSync.apply(copy); return nil } catch { return error.localizedDescription } }()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self, let runtime, self.session(runtime.id) != nil else { return }
+                        runtime.preparingStart = false
+                        if let failure { runtime.host.show("\u{1b}[2mNão consegui copiar a conversa: \(failure)\u{1b}[0m\r\n") }
+                        self.start(runtime, project: project, prompt: prompt, synced: true)
+                    }
+                }
+            }
+            return
+        }
         let resuming = resumeId != nil
         var folder = project.path
         var worktree = resuming ? nil : runtime.worktree
@@ -342,13 +370,15 @@ final class AppModel {
             runtime.lastChange = Date()
             self?.updateBadge()
         }
-        var env = loginEnvironment
+        // CLAUDE_CONFIG_DIR picks the login; WORKSPACES_CONTA tells scripts (the obra's despachante) which one.
+        var env = account.environment(loginEnvironment)
         env[ClaudeLaunch.sessionEnvKey] = runtime.id.uuidString
         env[ClaudeLaunch.launchEnvKey] = String(runtime.launch)
         if let home = ProcessInfo.processInfo.environment["WORKSPACES_HOME"] { env["WORKSPACES_HOME"] = home }
-        // Which account the session's usage belongs to, for scripts that read it (the obra's despachante).
-        env[LimitReadingStore.accountEnvKey] = LimitReadingStore.accountName(
-            ProcessInfo.processInfo.environment[LimitReadingStore.accountEnvKey])
+        runtime.account = account.name
+        runtime.pendingAccountSwitch = nil
+        tokens.note(runtime)
+        if isOnScreen(runtime.id) { tokens.meterAccount = account.name }
         // Straight to Claude when the command is plain words; the login shell only when it is not.
         if let argv = ClaudeLaunch.argv(options), let executable = ShellSupport.resolve(argv[0], path: env["PATH"]) {
             runtime.host.start(executable: executable, arguments: Array(argv.dropFirst()), environment: env, directory: folder)
@@ -385,7 +415,7 @@ final class AppModel {
         guard let runtime = session(id), !runtime.host.isRunning, let loginEnvironment,
               let (_, project) = project(runtime.projectId) else { return }
         let folder = runtime.cwd.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil } ?? project.path
-        startShell(runtime, in: folder, environment: loginEnvironment)
+        startShell(runtime, in: folder, environment: account(for: runtime).environment(loginEnvironment))
     }
 
     private func startShell(_ runtime: SessionRuntime, in folder: String, environment: [String: String]) {
@@ -414,6 +444,8 @@ final class AppModel {
         if let previous = visibleByWindow[window], previous != id { session(previous)?.lastSeen = Date() }
         visibleByWindow[window] = id
         if let id { wake(id) }
+        // The meter shows the account of the session on screen.
+        if let runtime = session(id), !runtime.isTerminal { tokens.meterAccount = tokens.account(of: runtime) }
         updateUsageSampling()
     }
 
@@ -648,7 +680,8 @@ final class AppModel {
             let enabled = WorkspaceTools.all.map(\.name).filter { !config.disabledTools.contains($0) }
             return IPCResponse(ok: true, text: "", enabledTools: enabled)
         case .statusLine:
-            if let caller, let payload = request.payload {
+            // A reading from a process already replaced (an account switch) belongs to the old account.
+            if let caller, let payload = request.payload, request.launch.flatMap(Int.init) ?? caller.launch == caller.launch {
                 let reading = StatusLineReading.parse(payload)
                 #if DEBUG
                 NSLog("status line from %@: context %@, five hour %@", caller.label, String(describing: reading.contextTokens),
@@ -724,6 +757,7 @@ final class AppModel {
             ConversationLog.append(session: runtime.id, label: runtime.label, update: update,
                                    from: resumable, to: runtime.conversation.resumable)
         }
+        tokens.note(runtime)
         if let cwd = update.cwd, !samePath(cwd, runtime.cwd) {
             // The name follows the branch only when it was a branch name; a name the person
             // gave ("automação na QA") stays.
@@ -747,10 +781,235 @@ final class AppModel {
             break
         }
         recycler.hook(update, runtime: runtime)
+        if runtime.pendingAccountSwitch != nil, runtime.status != .working {
+            // A moment after the turn ends, for a queued message to show in the transcript (and
+            // after this hook's reply: the switch ends the process that sent it).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak runtime] in
+                guard let self, let runtime, self.session(runtime.id) != nil, runtime.pendingAccountSwitch != nil else { return }
+                self.applyAccount(runtime)
+            }
+        }
         return output
     }
 
     var contextLimits: ContextLimits { config.contextLimits }
+
+    // MARK: Accounts
+
+    /// The account a session runs in: its own, or its workspace's, or the default one.
+    func account(for runtime: SessionRuntime) -> Account {
+        config.account(of: workspace(runtime.workspaceId), session: savedSession(runtime.id, project: runtime.projectId))
+    }
+
+    private func savedSession(_ id: UUID, project projectId: UUID) -> SavedSession? {
+        project(projectId)?.project.savedSessions.first { $0.id == id }
+    }
+
+    /// The account chosen for the session itself; nil when it follows its workspace.
+    func ownAccount(of runtime: SessionRuntime) -> String? {
+        config.account(named: savedSession(runtime.id, project: runtime.projectId)?.account)?.name
+    }
+
+    /// The session's own account; nil goes back to following the workspace.
+    func setAccount(_ name: String?, session id: UUID) {
+        guard let runtime = session(id), !runtime.isTerminal else { return }
+        updateProject(runtime.projectId) { project in
+            guard let i = project.savedSessions.firstIndex(where: { $0.id == id }) else { return }
+            project.savedSessions[i].account = name
+        }
+        applyAccount(runtime)
+    }
+
+    /// The workspace's account; nil is the default one. Its sessions without their own follow.
+    func setAccount(_ name: String?, workspace id: UUID) {
+        updateWorkspace(id) { $0.account = name }
+        applyAccounts()
+    }
+
+    func setDefaultAccount(_ name: String) {
+        config.defaultAccount = name
+        applyAccounts()
+    }
+
+    /// Adds a login folder. An empty or new one gets links to Claude Code's own settings, skills and
+    /// conversations; its login happens in the first session opened in it. Claude Code's own folder
+    /// is added as itself, without `CLAUDE_CONFIG_DIR`. A folder taken out before gets its name back,
+    /// and with it its readings.
+    func addAccount(folder: String) throws -> Account {
+        let env = toolEnvironment
+        let own = Account(name: "", configDirectory: nil).folder(environment: env)
+        let path = AccountFolder.resolved((folder as NSString).expandingTildeInPath)
+        func place(_ account: Account) -> String { AccountFolder.resolved(account.expandedDirectory ?? own) }
+        if let other = config.accounts.first(where: { place($0) == path }) {
+            throw AccountError("Essa pasta já é a conta \(accountLabel(other.name)).")
+        }
+        let isOwn = path == AccountFolder.resolved(own)
+        let retired = config.retiredAccounts.first { place($0) == path }
+        let account = Account(name: retired?.name ?? config.nextAccountName(taken: namesWithReadings()),
+                              configDirectory: isOwn ? nil : (folder as NSString).expandingTildeInPath)
+        if !isOwn { try AccountFolder.prepare(path, sharingWith: own) }
+        config.retiredAccounts.removeAll { $0.name == account.name }
+        config.accounts.append(account)
+        refreshAccountEmails()
+        return account
+    }
+
+    /// Takes it out of the app; its folder and login stay on disk, and are still searched for
+    /// conversations to resume. Whatever named it goes back to the default account.
+    func removeAccount(_ name: String) {
+        guard config.accounts.count > 1, let removed = config.account(named: name) else { return }
+        config.accounts.removeAll { $0.name == name }
+        config.retiredAccounts.removeAll { $0.name == name }
+        config.retiredAccounts.append(removed)
+        if config.defaultAccount == name { config.defaultAccount = config.mainAccount.name }
+        if tokens.meterAccount == name { tokens.meterAccount = config.mainAccount.name }
+        for w in config.workspaces.indices {
+            if config.workspaces[w].account == name { config.workspaces[w].account = nil }
+            for p in config.workspaces[w].projects.indices {
+                for s in config.workspaces[w].projects[p].savedSessions.indices where config.workspaces[w].projects[p].savedSessions[s].account == name {
+                    config.workspaces[w].projects[p].savedSessions[s].account = nil
+                }
+            }
+        }
+        applyAccounts()
+    }
+
+    /// Account names with limit readings on disk, never given to a new login.
+    private func namesWithReadings() -> Set<String> {
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: AppPaths.supportDirectory.path)) ?? []
+        return Set(files.compactMap { file in
+            file.hasPrefix("limit-readings-") && file.hasSuffix(".json") ? String(file.dropFirst(15).dropLast(5)) : nil
+        })
+    }
+
+    private func applyAccounts() {
+        for runtime in sessions { applyAccount(runtime) }
+    }
+
+    /// Puts a session in the account it should run in: now when nothing holds it, later when its
+    /// turn, a queued message, a command under it or a recycle does (each hook and every 30 s look
+    /// again), at the next start when nothing runs. A frozen one is ended like a hibernated one and
+    /// starts in the account when opened, so a switch never wakes every resting session at once.
+    private func applyAccount(_ runtime: SessionRuntime) {
+        guard !runtime.isTerminal, let current = runtime.account else { return }
+        guard account(for: runtime).name != current, runtime.host.isRunning, !runtime.shellOnly else {
+            runtime.pendingAccountSwitch = nil
+            return
+        }
+        if let wait = switchBlocker(runtime) {
+            runtime.pendingAccountSwitch = wait
+            return
+        }
+        switchNow(runtime)
+    }
+
+    /// "Trocar agora": the person accepts ending the turn or the commands that held the switch.
+    func switchAccountNow(_ id: UUID) {
+        guard let runtime = session(id), runtime.pendingAccountSwitch != nil, runtime.host.isRunning else { return }
+        switchNow(runtime)
+    }
+
+    private func switchNow(_ runtime: SessionRuntime) {
+        runtime.pendingAccountSwitch = nil
+        if runtime.sleep == .frozen { hibernate(runtime) } else { relaunch(runtime) }
+    }
+
+    /// Why the session cannot be ended now, or nil: a turn (a permission prompt included), a message
+    /// in Claude Code's queue, a command still running under it, a recycle.
+    private func switchBlocker(_ runtime: SessionRuntime) -> String? {
+        if runtime.status == .working { return "Troca de conta no fim do turno" }
+        if recycler.isBusy(runtime) { return "Troca de conta depois da reciclagem" }
+        if case .busy = TranscriptTurn.read(path: runtime.transcriptPath) { return "Troca de conta no fim do turno" }
+        if let pid = runtime.host.pid, ProcessTree.runsShell(under: pid) { return "Troca de conta quando os comandos da sessão acabarem" }
+        return nil
+    }
+
+    /// Ends Claude and, once the process is gone, starts it again in the session's account,
+    /// resuming the conversation.
+    private func relaunch(_ runtime: SessionRuntime) {
+        guard let (_, project) = project(runtime.projectId) else { return }
+        let pid = runtime.host.pid
+        // Hooks of the process being ended carry an older number and are dropped.
+        runtime.launch += 1
+        runtime.preparingStart = true
+        runtime.host.terminate()
+        runtime.host.show("\u{1b}[2J\u{1b}[H\u{1b}[2mTrocando para a conta \(accountLabel(account(for: runtime).name))...\u{1b}[0m\r\n")
+        runtime.status = .working
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak runtime] in
+            // The old Claude writes the end of its transcript as it exits; terminate() forces it after 5 s.
+            if let pid {
+                let deadline = Date().addingTimeInterval(7)
+                while Date() < deadline, kill(pid, 0) == 0 { Thread.sleep(forTimeInterval: 0.1) }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let runtime, self.session(runtime.id) != nil else { return }
+                    runtime.preparingStart = false
+                    guard !runtime.host.isRunning else { return }
+                    self.start(runtime, project: project, prompt: nil)
+                }
+            }
+        }
+    }
+
+    /// Switches held by a turn that ended without a hook (Esc) or by commands that finished.
+    private func retryPendingSwitches() {
+        for runtime in sessions where runtime.pendingAccountSwitch != nil { applyAccount(runtime) }
+    }
+
+    /// Where the session's process keeps its conversations, for the recycle.
+    func projectsRoot(for runtime: SessionRuntime) -> URL {
+        let running = (config.accounts + config.retiredAccounts).first { $0.name == runtime.account } ?? account(for: runtime)
+        return URL(fileURLWithPath: running.projectsDirectory(environment: toolEnvironment), isDirectory: true)
+    }
+
+    /// The email logged in to each account, by name. Read off the main thread, every 30 s and when
+    /// the accounts change, and only for a `.claude.json` that changed since.
+    private(set) var accountEmails: [String: String] = [:]
+    @ObservationIgnored private var emailStamps: [String: Date] = [:]
+    @ObservationIgnored private var readingEmails = false
+
+    func refreshAccountEmails() {
+        guard !readingEmails else { return }
+        readingEmails = true
+        let env = toolEnvironment
+        let files = config.accounts.map { ($0.name, $0.stateFile(environment: env)) }
+        let stamps = emailStamps, previous = accountEmails
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var emails: [String: String] = [:], newStamps: [String: Date] = [:]
+            for (name, file) in files {
+                let modified = (try? FileManager.default.attributesOfItem(atPath: file))?[.modificationDate] as? Date
+                newStamps[file] = modified
+                if let modified, stamps[file] == modified, let known = previous[name] {
+                    emails[name] = known
+                } else if let email = AccountLogin.email(stateFile: file) {
+                    emails[name] = email
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.readingEmails = false
+                    self.emailStamps = newStamps
+                    if self.accountEmails != emails { self.accountEmails = emails }
+                }
+            }
+        }
+    }
+
+    func accountEmail(_ account: Account) -> String? { accountEmails[account.name] }
+
+    /// The email, or the name ("conta2") while nobody logged in.
+    func accountLabel(_ name: String) -> String {
+        guard let account = config.account(named: name) else { return name }
+        return accountEmail(account) ?? name
+    }
+
+    /// The part of the email before the @, for tight places.
+    func accountShortLabel(_ name: String) -> String {
+        let label = accountLabel(name)
+        return label.split(separator: "@").first.map(String.init) ?? label
+    }
 
     /// Above the limit, the session is told to write its Passagem: once on crossing, then every 50 mil.
     private func handoffReminder(_ runtime: SessionRuntime, event: String) -> String? {
@@ -794,6 +1053,8 @@ final class AppModel {
         now = Date()
         applySleepPolicy()
         updateKeepAwake()
+        retryPendingSwitches()
+        refreshAccountEmails()
     }
 
     private func updateKeepAwake() {
@@ -872,10 +1133,16 @@ enum Orphans {
     }
 }
 
+struct AccountError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
+
 /// Equal paths after resolving symlinks (/tmp and /private/tmp are the same folder).
 private func samePath(_ a: String, _ b: String?) -> Bool {
     guard let b else { return false }
-    return URL(fileURLWithPath: a).resolvingSymlinksInPath().path == URL(fileURLWithPath: b).resolvingSymlinksInPath().path
+    return AccountFolder.resolved(a) == AccountFolder.resolved(b)
 }
 
 enum Git {

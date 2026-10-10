@@ -13,7 +13,6 @@ final class Recycler {
     private weak var model: AppModel?
     private let host: AppRecycleHost
     private let engine: RecycleEngine
-    private let projectsRoot = AppRecycleHost.projectsRoot
 
     init(model: AppModel, log: RecycleLog = RecycleLog()) {
         self.model = model
@@ -57,7 +56,7 @@ final class Recycler {
             return ToolResult(text: refusal.message, isError: true)
         }
         let conversation = target.hasConversation ? target.claudeSessionId : nil
-        let transcript = conversation.flatMap { TranscriptLocator.find(conversation: $0, hint: target.transcriptPath, root: projectsRoot) }
+        let transcript = conversation.flatMap { TranscriptLocator.find(conversation: $0, hint: target.transcriptPath, root: model.projectsRoot(for: target)) }
         let record = RecycleRecord(kind: .close, session: target.id.uuidString, label: model.displayLabel(target), cwd: folder,
                                    frente: worktree.frenteText == nil ? nil : worktree.frentePath,
                                    oldConversation: conversation, oldTranscript: transcript,
@@ -97,8 +96,6 @@ final class Recycler {
 /// The app's sessions as the recycle sees them. Not isolated itself: the engine calls it on the
 /// main queue, where every timer it sets runs too.
 final class AppRecycleHost: RecycleHost {
-    static let projectsRoot = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/projects", isDirectory: true)
-
     private weak var model: AppModel?
 
     init(model: AppModel) {
@@ -144,8 +141,8 @@ final class AppRecycleHost: RecycleHost {
 
     func transcript(_ id: UUID, conversation: String) -> String? {
         MainActor.assumeIsolated {
-            let hint = model?.session(id)?.transcriptPath
-            return TranscriptLocator.find(conversation: conversation, hint: hint, root: Self.projectsRoot)
+            guard let model, let runtime = model.session(id) else { return nil }
+            return TranscriptLocator.find(conversation: conversation, hint: runtime.transcriptPath, root: model.projectsRoot(for: runtime))
         }
     }
 

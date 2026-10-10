@@ -197,6 +197,13 @@ private struct Sidebar: View {
         .padding(.top, 6)
         .contextMenu {
             Button("Nova sessão em \(project.name)") { newSession(in: project.id) }
+            if model.config.accounts.count > 1 {
+                Menu("Nova sessão em \(project.name) na conta") {
+                    ForEach(model.config.accounts) { account in
+                        Button(model.accountLabel(account.name)) { newSession(in: project.id, account: account.name) }
+                    }
+                }
+            }
             Button("Novo terminal em \(project.name)") { newTerminal(in: project.id) }
             Button("Mostrar no Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.path) }
         }
@@ -218,6 +225,13 @@ private struct Sidebar: View {
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
                 TokenMark(session: session)
+                if let account = accountMark(session) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(session.pendingAccountSwitch != nil ? Theme.secondary : Theme.faint)
+                        .help(account)
+                        .accessibilityLabel(account)
+                }
                 if session.sleep != .awake {
                     Image(systemName: "moon")
                         .font(.system(size: 9, weight: .medium))
@@ -244,17 +258,36 @@ private struct Sidebar: View {
             Button("Nova sessão neste projeto") { newSession(in: session.projectId) }
             if !session.isTerminal {
                 Button("Abrir terminal na pasta desta sessão") { newTerminal(in: session.projectId, folder: session.cwd) }
+                if model.config.accounts.count > 1 {
+                    let workspace = model.config.account(of: model.workspace(session.workspaceId)).name
+                    AccountPicker(title: "Conta", selection: model.ownAccount(of: session),
+                                  followLabel: "A do workspace (\(model.accountLabel(workspace)))") { name in
+                        model.setAccount(name, session: session.id)
+                    }
+                    if session.pendingAccountSwitch != nil {
+                        Button("Trocar de conta agora") { model.switchAccountNow(session.id) }
+                    }
+                }
             }
             Divider()
             Button("Fechar sessão") { model.closeSession(session.id) }
         }
     }
 
-    private func newSession(in projectId: UUID) {
-        if let runtime = model.newSession(projectId: projectId) {
+    private func newSession(in projectId: UUID, account: String? = nil) {
+        if let runtime = model.newSession(projectId: projectId, account: account) {
             selection = runtime.id
             mode = .single
         }
+    }
+
+    /// Text for the mark of a session that does not run in its workspace's account, or switches soon.
+    private func accountMark(_ session: SessionRuntime) -> String? {
+        guard !session.isTerminal, model.config.accounts.count > 1 else { return nil }
+        let chosen = model.account(for: session).name
+        if let wait = session.pendingAccountSwitch { return "\(wait): conta \(model.accountLabel(chosen))" }
+        guard chosen != model.config.account(of: model.workspace(session.workspaceId)).name else { return nil }
+        return "Na conta \(model.accountLabel(chosen))"
     }
 
     private func newTerminal(in projectId: UUID, folder: String? = nil) {
@@ -282,18 +315,35 @@ private struct WorkspaceSwitcher: View {
 
     var body: some View {
         let index = model.config.workspaces.firstIndex { $0.id == workspaceId }
+        let accounts = model.config.accounts.count > 1
+        let account = model.config.account(of: model.workspace(workspaceId)).name
         Menu {
             ForEach(model.config.workspaces) { workspace in
                 Button(workspace.name) { openWindow(id: "workspace", value: workspace.id) }
             }
             Divider()
+            if accounts {
+                AccountPicker(title: "Conta deste workspace", selection: model.workspace(workspaceId)?.account,
+                              followLabel: "A padrão (\(model.accountLabel(model.config.mainAccount.name)))") { name in
+                    model.setAccount(name, workspace: workspaceId)
+                }
+            }
             SettingsLink { Text("Editar workspaces") }
         } label: {
             HStack(spacing: 8) {
                 Text(model.workspace(workspaceId)?.name ?? "")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.primary)
-                Spacer()
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if accounts {
+                    Text(model.accountShortLabel(account))
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help("Conta deste workspace: \(model.accountLabel(account))")
+                }
                 if let index, index < 9 {
                     Text("⌃\(index + 1)").font(.system(size: 11)).foregroundStyle(Theme.tertiary)
                 }
@@ -335,6 +385,7 @@ private struct DetailToolbar: View {
                 .font(.system(size: 13))
                 .lineLimit(1)
                 if !session.isTerminal { StatusPill(session: session) }
+                if !session.isTerminal, model.config.accounts.count > 1 { AccountTag(session: session) }
                 if session.sleep != .awake { SleepTag(sleep: session.sleep) }
                 ContextMeter(session: session)
                 UsageBadge(session: session)

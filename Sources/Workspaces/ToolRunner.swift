@@ -27,9 +27,11 @@ struct ToolRunner {
 
     private func listSessions(all: Bool) -> ToolResult {
         let workspaces = model.config.workspaces.filter { all || caller == nil || $0.id == caller?.workspaceId }
+        // The account only matters when there is more than one.
+        let accounts = model.config.accounts.count > 1
         var lines: [String] = []
         for workspace in workspaces {
-            lines.append("Workspace \(workspace.name)")
+            lines.append("Workspace \(workspace.name)" + (accounts ? " | account \(accountText(model.config.account(of: workspace).name))" : ""))
             for project in workspace.projects {
                 lines.append("  Project \(project.name) (\(project.path))")
                 let sessions = model.sessions(inProject: project.id)
@@ -37,6 +39,8 @@ struct ToolRunner {
                 for s in sessions {
                     var line = "    - \(s.label) | \(s.status.rawValue) | id \(s.shortId)"
                     if s.isTerminal { line += " | terminal (shell, not Claude)" }
+                    else if accounts { line += " | account \(accountText(model.account(for: s).name))" }
+                    if s.pendingAccountSwitch != nil { line += " (switches account when nothing holds it: turn, queue or background commands)" }
                     if let activity = s.activity, s.status == .working { line += " | \(activity)" }
                     if let message = s.message, s.status == .waiting { line += " | \(message)" }
                     if s.sleep != .awake { line += " | \(s.sleep.rawValue), wakes when opened or messaged" }
@@ -69,10 +73,27 @@ struct ToolRunner {
             return ToolResult(text: "Projeto \"\(wanted)\" não encontrado. Use list_sessions para ver os nomes.", isError: true)
         }
         let worktree = args["worktree"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
-        guard let runtime = model.newSession(projectId: project.id, worktree: worktree, prompt: args["prompt"]?.stringValue) else {
+        var account: String?
+        if let wanted = args["account"]?.stringValue?.trimmingCharacters(in: .whitespaces).lowercased(), !wanted.isEmpty {
+            guard let found = model.config.accounts.first(where: {
+                $0.name.lowercased() == wanted || model.accountEmail($0)?.lowercased() == wanted
+            }) else {
+                let known = model.config.accounts.map { accountText($0.name) }.joined(separator: ", ")
+                return ToolResult(text: "Conta \"\(wanted)\" não encontrada. As contas do app: \(known).", isError: true)
+            }
+            account = found.name
+        }
+        guard let runtime = model.newSession(projectId: project.id, worktree: worktree, prompt: args["prompt"]?.stringValue,
+                                             account: account) else {
             return ToolResult(text: "Não consegui abrir a sessão.", isError: true)
         }
-        return ToolResult(text: "Opened session \(runtime.label) (id \(runtime.shortId)) in \(project.name).")
+        return ToolResult(text: "Opened session \(runtime.label) (id \(runtime.shortId)) in \(project.name), account \(accountText(model.account(for: runtime).name)).")
+    }
+
+    /// "conta2 (kohler@gmail.com)", or the name alone while nobody logged in.
+    private func accountText(_ name: String) -> String {
+        let label = model.accountLabel(name)
+        return label == name ? name : "\(name) (\(label))"
     }
 
     private enum Target {

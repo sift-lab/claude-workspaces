@@ -4,6 +4,7 @@ import WorkspacesCore
 
 private enum SettingsPane: Hashable {
     case general
+    case accounts
     case workspace(UUID)
     case claude
 }
@@ -20,6 +21,7 @@ struct SettingsView: View {
                 Group {
                     switch pane {
                     case .general: GeneralPane()
+                    case .accounts: AccountsPane()
                     case .workspace(let id): WorkspacePane(workspaceId: id)
                     case .claude: ClaudePane()
                     }
@@ -35,6 +37,7 @@ struct SettingsView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             item("Geral", .general)
+            item("Contas", .accounts, trailing: "\(model.config.accounts.count)")
             SectionLabel(text: "Workspaces").padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 4)
             ForEach(model.config.workspaces) { workspace in
                 item(workspace.name, .workspace(workspace.id), trailing: "\(workspace.projects.count)")
@@ -233,13 +236,21 @@ private struct WorkspacePane: View {
             VStack(alignment: .leading, spacing: 24) {
                 PaneTitle(text: workspace.name)
                 SettingsGroup(title: "Geral") {
-                    FormRow(title: "Nome", last: true) {
+                    FormRow(title: "Nome") {
                         CommitField(placeholder: "", value: model.workspace(workspaceId)?.name ?? "") { name in
                             model.updateWorkspace(workspaceId) { $0.name = name }
                         }
                         .textFieldStyle(.roundedBorder)
                         .multilineTextAlignment(.trailing)
                         .frame(width: 220)
+                    }
+                    FormRow(title: "Conta", subtitle: "Onde as sessões rodam, menos as que têm conta própria", last: true) {
+                        AccountPicker(title: "", selection: workspace.account,
+                                      followLabel: "A padrão (\(model.accountLabel(model.config.mainAccount.name)))") { name in
+                            model.setAccount(name, workspace: workspaceId)
+                        }
+                        .labelsHidden()
+                        .frame(width: 260)
                     }
                 }
                 SettingsGroup(title: "Projetos", accessory: AnyView(
@@ -264,6 +275,89 @@ private struct WorkspacePane: View {
         panel.prompt = "Adicionar"
         guard panel.runModal() == .OK else { return }
         for url in panel.urls { model.addProject(path: url.path, to: workspaceId) }
+    }
+}
+
+private struct AccountsPane: View {
+    @Environment(AppModel.self) private var model
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            PaneTitle(text: "Contas")
+            Text("Cada conta é uma pasta de configuração do Claude Code (CLAUDE_CONFIG_DIR), com o próprio login. Uma sessão roda na conta escolhida para ela; sem escolha, na do workspace; sem essa, na padrão. Trocar a conta de uma sessão reabre o Claude na outra, na mesma conversa; no meio de um turno, a troca espera o turno acabar.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            SettingsGroup(title: "Contas", accessory: AnyView(
+                Button("Adicionar conta…", action: add).buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.support)
+            )) {
+                ForEach(Array(model.config.accounts.enumerated()), id: \.element.id) { index, account in
+                    row(account, last: index == model.config.accounts.count - 1)
+                }
+            }
+            if let error {
+                Text(error).font(.system(size: 12)).foregroundStyle(Theme.warning)
+            }
+            Text("Numa pasta nova ou vazia, o app liga as configurações, as instruções, as skills, os plugins e as conversas da pasta do Claude Code; o login fica separado e a primeira sessão aberta nela pede para entrar. Os servidores MCP do usuário ficam no .claude.json de cada conta.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { model.refreshAccountEmails() }
+    }
+
+    private func row(_ account: Account, last: Bool) -> some View {
+        let isDefault = account.name == model.config.mainAccount.name
+        let folder = account.configDirectory.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "pasta do Claude Code"
+        let users = sessionsIn(account.name)
+        return FormRow(title: model.accountEmail(account) ?? "Sem login ainda",
+                       subtitle: "\(account.name) · \(folder) · \(users) \(users == 1 ? "sessão aberta" : "sessões abertas")", last: last) {
+            HStack(spacing: 12) {
+                if isDefault {
+                    Text("Padrão").font(.system(size: 12)).foregroundStyle(Theme.tertiary)
+                } else {
+                    Button("Usar como padrão") { model.setDefaultAccount(account.name) }.controlSize(.small)
+                }
+                if let directory = account.expandedDirectory {
+                    Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: directory)]) } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.tertiary)
+                    .help("Mostrar a pasta no Finder")
+                    .accessibilityLabel("Mostrar a pasta de \(account.name) no Finder")
+                }
+                Button { model.removeAccount(account.name) } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.tertiary)
+                    .disabled(model.config.accounts.count == 1)
+                    .help("Tirar do app. A pasta e o login continuam no disco; o que usava esta conta passa para a padrão.")
+                    .accessibilityLabel("Remover \(account.name)")
+            }
+        }
+    }
+
+    private func sessionsIn(_ name: String) -> Int {
+        model.sessions.filter { !$0.isTerminal && model.account(for: $0).name == name }.count
+    }
+
+    private func add() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.showsHiddenFiles = true
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        panel.message = "Escolha a pasta da conta, como ~/.claude-b. Para uma conta nova, crie uma pasta vazia."
+        panel.prompt = "Adicionar"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            _ = try model.addAccount(folder: url.path)
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }
 
@@ -324,7 +418,7 @@ private struct ClaudePane: View {
     private let toolTitles: [String: (String, String)] = [
         "list_sessions": ("Ver o workspace", "Lista as outras sessões e o estado de cada uma"),
         "set_status": ("Dizer o que está fazendo", "A frase aparece na barra de ferramentas e na grade"),
-        "open_session": ("Abrir outra sessão", "Num projeto do workspace, com branch ou worktree"),
+        "open_session": ("Abrir outra sessão", "Num projeto do workspace, com worktree e conta"),
         "send_message": ("Mandar recado", "Digita na caixa de outra sessão, sem enviar"),
         "notify": ("Pedir sua atenção", "Notificação com uma frase"),
         "close_session": ("Fechar sessões", "Encerra uma sessão parada do mesmo workspace, só sem mudança fora de commit"),
