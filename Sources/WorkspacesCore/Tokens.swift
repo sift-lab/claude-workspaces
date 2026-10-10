@@ -244,9 +244,9 @@ public final class TokenLedger: @unchecked Sendable {
 
     /// The most ever spent in any stretch of `span` seconds between two moments. The account's
     /// window holds at least that much, since local use never goes past the limit.
-    public func heaviest(span: TimeInterval, from: Date, to: Date) -> Double {
+    public func heaviest(span: TimeInterval, from: Date, to: Date, only filter: LedgerFilter? = nil) -> Double {
         let a = from.timeIntervalSince1970, b = to.timeIntervalSince1970
-        let points = entries.filter { $0.time >= a && $0.time < b }.map { ($0.time, $0.weight) }.sorted { $0.0 < $1.0 }
+        let points = entries.filter { $0.time >= a && $0.time < b && Self.counts($0, filter) }.map { ($0.time, $0.weight) }.sorted { $0.0 < $1.0 }
         var best = 0.0, sum = 0.0, j = 0
         for i in points.indices {
             sum += points[i].1
@@ -260,13 +260,50 @@ public final class TokenLedger: @unchecked Sendable {
     }
 
     /// Weight spent between two moments, by everyone or by one session (agents included).
-    public func weight(from: Date, to: Date = .distantFuture, session: String? = nil) -> Double {
+    public func weight(from: Date, to: Date = .distantFuture, session: String? = nil, only filter: LedgerFilter? = nil) -> Double {
         let a = from.timeIntervalSince1970, b = to.timeIntervalSince1970
         let s = session.flatMap { sessionIndex[$0] }
         if session != nil, s == nil { return 0 }
         var total = 0.0
-        for e in entries where e.time >= a && e.time < b && (s == nil || e.session == s) { total += e.weight }
+        for e in entries where e.time >= a && e.time < b && (s == nil || e.session == s) && Self.counts(e, filter) { total += e.weight }
         return total
+    }
+
+    /// What counts in the `only` of the sums: the spend of one account, per session and moment.
+    /// A session the ledger learns after the filter was made does not count.
+    public func filter(_ changes: (String) -> [LedgerFilter.Change]) -> LedgerFilter {
+        LedgerFilter(changes: sessions.map { changes($0.id).sorted { $0.from < $1.from } })
+    }
+
+    static func counts(_ e: Entry, _ filter: LedgerFilter?) -> Bool {
+        filter?.counts(e) ?? true
+    }
+}
+
+/// Which calls count in a sum. Per session, the moments from which it counts or stops counting;
+/// before the first one, the first one holds. A session with none never counts.
+public struct LedgerFilter: Sendable {
+    public struct Change: Equatable, Sendable {
+        public var from: Double
+        public var counts: Bool
+
+        public init(from: Double, counts: Bool) {
+            self.from = from
+            self.counts = counts
+        }
+    }
+
+    let changes: [[Change]]
+
+    func counts(_ e: TokenLedger.Entry) -> Bool {
+        let i = Int(e.session)
+        guard i < changes.count, let first = changes[i].first else { return false }
+        var result = first.counts
+        for change in changes[i] {
+            guard change.from <= e.time else { break }
+            result = change.counts
+        }
+        return result
     }
 }
 
@@ -566,9 +603,10 @@ public struct TokenOverview: Equatable, Sendable {
 }
 
 public extension TokenLedger {
-    /// `group` names the group of a working folder (a workspace); `days` counts back from today.
+    /// `group` names the group of a working folder (a workspace); `days` counts back from today;
+    /// `only` keeps the sessions of one account.
     func overview(now: Date, windowStart: Date, weekStart: Date, days dayCount: Int = 14,
-                  calendar: Calendar = .current, group: (String?) -> String) -> TokenOverview {
+                  calendar: Calendar = .current, only filter: LedgerFilter? = nil, group: (String?) -> String) -> TokenOverview {
         let tn = now.timeIntervalSince1970, tw = windowStart.timeIntervalSince1970, tk = weekStart.timeIntervalSince1970
         let tPrev = tk - 7 * 86_400
         let t7 = tn - 7 * 86_400
@@ -596,7 +634,7 @@ public extension TokenLedger {
         var week: [Int32: Acc] = [:]
         var window: [Int32: Acc] = [:]
 
-        for e in entries {
+        for e in entries where Self.counts(e, filter) {
             let t = e.time, w = e.weight
             if t >= tw, t <= tn {
                 inWindow += w

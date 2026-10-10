@@ -29,6 +29,7 @@ struct UsageView: View {
                             .foregroundStyle(Theme.secondary)
                     }
                     Spacer()
+                    if tab != .machine { MeterAccountPicker() }
                     SegmentedSwitch(options: [("Agora", UsageTab.now), ("Semana", UsageTab.week), ("Máquina", UsageTab.machine)], selection: $tab)
                 }
                 .padding(.horizontal, 28)
@@ -59,8 +60,12 @@ struct UsageView: View {
 
     private var subtitle: String {
         switch tab {
-        case .now: return "Tokens das sessões abertas e o limite da sua conta, atualizados a cada resposta."
-        case .week: return "O gasto das últimas duas semanas: por dia, por workspace e por sessão."
+        case .now: return model.config.accounts.count > 1
+            ? "Tokens das sessões abertas da conta escolhida e o limite dela, atualizados a cada resposta."
+            : "Tokens das sessões abertas e o limite da sua conta, atualizados a cada resposta."
+        case .week: return model.config.accounts.count > 1
+            ? "O gasto das últimas duas semanas na conta escolhida: por dia, por workspace e por sessão."
+            : "O gasto das últimas duas semanas: por dia, por workspace e por sessão."
         case .machine: return "Memória e CPU do Claude e dos servidores MCP de cada sessão, atualizados a cada 3 s."
         }
     }

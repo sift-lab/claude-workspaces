@@ -322,7 +322,7 @@ private struct SessionsNow: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(model.config.workspaces) { workspace in
                 let rows = model.sessions(inWorkspace: workspace.id)
-                    .filter { !$0.isTerminal && $0.claudeSessionId != nil }
+                    .filter { !$0.isTerminal && $0.claudeSessionId != nil && tokens.account(of: $0) == tokens.meterAccount }
                     .sorted { (tokens.tokens($0)?.weightInWindow ?? 0) > (tokens.tokens($1)?.weightInWindow ?? 0) }
                 if !rows.isEmpty {
                     let total = rows.reduce(0.0) { $0 + tokens.windowPercent(tokens.tokens($1)?.weightInWindow ?? 0) }

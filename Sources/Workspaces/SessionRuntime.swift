@@ -47,6 +47,14 @@ final class SessionRuntime: Identifiable {
     @ObservationIgnored var alarmedConversation: String?
     /// Where a recycle (recycle_self or recycle_session) stands.
     var recycle: RecycleProgress?
+    /// The account the process runs in (the last one, while it is not running); nil before the first start.
+    var account: String?
+    /// Another account was chosen while the session could not stop: why it waits ("no fim do turno").
+    /// Claude starts again in it as soon as nothing holds it.
+    var pendingAccountSwitch: String?
+    /// Between ending Claude for another account (or copying its conversation there) and starting
+    /// it again; nothing else starts it meanwhile.
+    @ObservationIgnored var preparingStart = false
 
     @ObservationIgnored let host = TerminalHost()
 
@@ -66,6 +74,7 @@ final class SessionRuntime: Identifiable {
         if sleep != .awake { return sleep == .frozen ? "Congelada, volta na hora ao abrir" : "Hibernando, retoma ao abrir" }
         if isTerminal { return status == .ended ? "Terminal encerrado" : "Terminal" }
         if let recycle, recycle.inProgress || recycle.isFailure { return recycle.text }
+        if let pendingAccountSwitch { return pendingAccountSwitch }
         if status == .waiting, let message { return message }
         if status == .working, let activity { return activity }
         return status.label

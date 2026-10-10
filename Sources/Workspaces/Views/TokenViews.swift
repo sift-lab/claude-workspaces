@@ -559,7 +559,12 @@ struct MenuBarLimitSection: View {
         let tokens = model.tokens
         if let five = tokens.fiveHourLimit {
             VStack(alignment: .leading, spacing: 0) {
-                SectionLabel(text: "Limite").padding(.bottom, 8)
+                HStack {
+                    SectionLabel(text: "Limite")
+                    Spacer()
+                    MeterAccountPicker().controlSize(.small)
+                }
+                .padding(.bottom, 8)
                 meter("Janela de 5 h", five, alert: tokens.windowAtRisk, text: LimitText.fiveHour(five))
                 if let week = tokens.weekLimit {
                     meter("Semana", week, alert: false, text: LimitText.week(week)).padding(.top, 12)

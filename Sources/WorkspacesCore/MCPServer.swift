@@ -51,11 +51,12 @@ public enum WorkspaceTools {
         ),
         ToolDefinition(
             name: "open_session",
-            description: "Opens a new Claude Code session in a project of the Workspaces app, optionally in a new git worktree and with a first prompt.",
+            description: "Opens a new Claude Code session in a project of the Workspaces app, optionally in a new git worktree, with a first prompt and in a chosen account.",
             inputSchema: schema([
                 "project": ("string", "Project name as list_sessions shows it."),
                 "worktree": ("string", "Name for a new git worktree. Omit to follow the project's setting."),
                 "prompt": ("string", "First message for the new session."),
+                "account": ("string", "Account to run under, by name (conta1, conta2) or email as list_sessions shows it. Omit to follow the workspace."),
             ], required: ["project"])
         ),
         ToolDefinition(
