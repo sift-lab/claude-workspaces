@@ -196,7 +196,7 @@ enum TokenShots {
     }
 
     /// Sidebar rows of the sessions read from the transcripts, the heaviest context first, with the
-    /// mark each one gets (context, "passagem" past the limit, red past the alarm).
+    /// mark each one gets (context, and an arrow while it climbs fast).
     private struct SidebarShot: View {
         @Environment(AppModel.self) private var model
 

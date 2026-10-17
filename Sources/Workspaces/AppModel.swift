@@ -45,8 +45,6 @@ final class AppModel {
     private(set) var appUsage: Usage = .zero
     /// Tokens the sessions spend and the account's limit.
     let tokens = TokenMonitor()
-    /// recycle_self, recycle_session and close_session. Set at the end of init.
-    @ObservationIgnored private(set) var recycler: Recycler!
     /// "Procurar atualizações…" and the silent checks. Started once the app finished launching.
     @ObservationIgnored private(set) var updater: Updater!
     /// Workspaces whose windows were open before an update restarted the app.
@@ -93,7 +91,6 @@ final class AppModel {
         }
         slowTimer?.tolerance = 5
         Notifier.shared.setUp { [weak self] sessionId in self?.focus(sessionId: sessionId) }
-        recycler = Recycler(model: self)
         updater = Updater(model: self)
         pendingReopen = Self.takeReopenList()
         tokens.start(model: self)
@@ -592,7 +589,6 @@ final class AppModel {
 
     func closeSession(_ id: UUID) {
         guard let runtime = session(id) else { return }
-        recycler.forget(id)
         runtime.sleep = .awake
         runtime.host.terminate()
         pendingPaste[id] = nil
@@ -638,12 +634,10 @@ final class AppModel {
         switch request.kind {
         case .hook:
             // A hook from a process that was already replaced (a hibernated one exiting late) is dropped.
-            // The reply's text, when not empty, is JSON the hook prints for Claude Code.
-            var output = ""
             if let caller, let payload = request.payload, request.launch.flatMap(Int.init) ?? caller.launch == caller.launch {
-                output = applyHook(payload, to: caller) ?? ""
+                applyHook(payload, to: caller)
             }
-            return IPCResponse(ok: true, text: output)
+            return IPCResponse(ok: true, text: "")
         case .tools:
             let enabled = WorkspaceTools.all.map(\.name).filter { !config.disabledTools.contains($0) }
             return IPCResponse(ok: true, text: "", enabledTools: enabled)
@@ -655,7 +649,6 @@ final class AppModel {
                       String(describing: reading.fiveHour?.percent))
                 #endif
                 tokens.receive(reading, from: caller)
-                recycler.statusLine(reading, runtime: caller)
             }
             return IPCResponse(ok: true, text: "")
         case .tool:
@@ -703,9 +696,8 @@ final class AppModel {
     /// A recado typed only once a hibernated session is back.
     func hasPendingPaste(_ id: UUID) -> Bool { pendingPaste[id] != nil }
 
-    /// Applies a hook and returns what the hook should print for Claude Code, if anything.
-    private func applyHook(_ payload: JSONValue, to runtime: SessionRuntime) -> String? {
-        guard let update = HookEvent.update(from: payload) else { return nil }
+    private func applyHook(_ payload: JSONValue, to runtime: SessionRuntime) {
+        guard let update = HookEvent.update(from: payload) else { return }
         if let path = update.transcriptPath { runtime.transcriptPath = path }
         if update.status == .idle, let text = pendingPaste.removeValue(forKey: runtime.id) {
             // SessionStart comes a moment before the prompt accepts input.
@@ -736,45 +728,6 @@ final class AppModel {
         if runtime.status == .waiting, before != .waiting { announceWaiting(runtime) }
         updateBadge()
         if runtime.status != before { updateKeepAwake() }
-
-        var output: String?
-        switch update.event {
-        case "SessionStart" where update.source == "clear":
-            output = recycler.sessionStartContext(for: runtime)
-        case "PostToolUse", "UserPromptSubmit":
-            output = handoffReminder(runtime, event: update.event)
-        default:
-            break
-        }
-        recycler.hook(update, runtime: runtime)
-        return output
-    }
-
-    var contextLimits: ContextLimits { config.contextLimits }
-
-    /// Above the limit, the session is told to write its Passagem: once on crossing, then every 50 mil.
-    private func handoffReminder(_ runtime: SessionRuntime, event: String) -> String? {
-        guard !runtime.isTerminal, let conversation = runtime.claudeSessionId, !recycler.isBusy(runtime) else { return nil }
-        var last = runtime.handoffReminder?.conversation == conversation ? runtime.handoffReminder?.tokens : nil
-        let text = contextLimits.reminder(tokens: tokens.context(runtime), lastWarned: &last)
-        runtime.handoffReminder = (conversation, last)
-        return text.map { HookOutput.additionalContext(event: event, $0) }
-    }
-
-    /// Above 500 mil: one notification per conversation, and the mark turns red. The model is never
-    /// switched and nothing is compacted on purpose: compaction summarizes and loses detail.
-    func checkContextAlarms() {
-        let limits = contextLimits
-        for runtime in sessions where !runtime.isTerminal {
-            guard let conversation = runtime.claudeSessionId, runtime.alarmedConversation != conversation,
-                  let context = tokens.context(runtime), limits.level(context) == .alarm else { continue }
-            runtime.alarmedConversation = conversation
-            let projectName = project(runtime.projectId)?.project.name ?? ""
-            Notifier.shared.post(
-                title: "\(displayLabel(runtime)) passou de \(TokenFormat.tokens(limits.alarm)) de contexto",
-                body: "\(projectName): contexto em \(TokenFormat.tokens(context)). A sessão precisa escrever a Passagem no FRENTE.md e chamar recycle_self.",
-                sessionId: runtime.id)
-        }
     }
 
     func announceWaiting(_ runtime: SessionRuntime, text: String? = nil) {

@@ -1,7 +1,7 @@
 import Foundation
 
 /// `<helper> tool <name> [json]`: runs one MCP tool in the app (or the server daemon) from a script.
-/// The obra's despachante opens, lists, recycles and closes sessions this way, as no session. Run
+/// The obra's despachante opens, lists and closes sessions this way, as no session. Run
 /// from inside a session (`WORKSPACES_SESSION` set), it acts as that session, with its limits.
 public enum ToolCommand {
     public static let usage = "uso: tool <nome> ['{\"arg\": \"valor\"}']"

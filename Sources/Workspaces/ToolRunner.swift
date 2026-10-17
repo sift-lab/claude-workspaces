@@ -15,8 +15,6 @@ struct ToolRunner {
         case "send_message": return sendMessage(to: args["session"]?.stringValue, text: args["text"]?.stringValue)
         case "notify": return notify(args["text"]?.stringValue)
         case "close_session": return closeSession(args)
-        case "recycle_self": return recycleSelf(args)
-        case "recycle_session": return recycleSession(args)
         default: return ToolResult(text: "Ferramenta desconhecida: \(name)", isError: true)
         }
     }
@@ -41,8 +39,7 @@ struct ToolRunner {
                     if let message = s.message, s.status == .waiting { line += " | \(message)" }
                     if s.sleep != .awake { line += " | \(s.sleep.rawValue), wakes when opened or messaged" }
                     else if s.host.isRunning { line += " | \(ByteFormat.short(model.currentUsage(s).memory))" }
-                    if !s.isTerminal, let context = model.tokens.context(s) { line += " | " + contextText(context) }
-                    if let recycle = s.recycle { line += " | \(recycle.text)" }
+                    if !s.isTerminal, let context = model.tokens.context(s) { line += " | contexto \(ContextFormat.short(context))" }
                     if s.id == caller?.id { line += " (this session)" }
                     lines.append(line)
                 }
@@ -124,25 +121,16 @@ struct ToolRunner {
         return ToolResult(text: "ok")
     }
 
-    /// "contexto 412k", with the handoff and the alarm when they apply.
-    private func contextText(_ context: Int) -> String {
-        let limits = model.contextLimits
-        var text = "contexto \(ContextLimits.short(context))"
-        switch limits.level(context) {
-        case .normal: break
-        case .needsHandoff: text += " (precisa de passagem: acima de \(ContextLimits.short(limits.handoff)))"
-        case .alarm: text += " (precisa de passagem; alarme: acima de \(ContextLimits.short(limits.alarm)))"
-        }
-        return text
-    }
-
-    /// These tools never carry free text: any argument beyond the allowed ones is refused.
+    /// close_session takes no free text: any argument beyond the allowed ones is refused.
     private func refuseExtra(_ args: JSONValue, allowed: Set<String>) -> ToolResult? {
-        let extra = RecycleGate.unexpectedArguments(args, allowed: allowed)
+        let extra = WorkspaceTools.unexpectedArguments(args, allowed: allowed)
         guard !extra.isEmpty else { return nil }
-        return ToolResult(text: "Recusado: esta ferramenta não aceita \(extra.joined(separator: ", ")); o texto enviado à sessão é sempre o fixo.", isError: true)
+        return ToolResult(text: "Recusado: esta ferramenta não aceita \(extra.joined(separator: ", ")).", isError: true)
     }
 
+    private static let projectsRoot = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/projects", isDirectory: true)
+
+    /// Refused while the session works or waits, or with changes not committed. Logged first.
     private func closeSession(_ args: JSONValue) -> ToolResult {
         if let refusal = refuseExtra(args, allowed: ["session"]) { return refusal }
         let session: SessionRuntime
@@ -151,25 +139,23 @@ struct ToolRunner {
         case .found(let runtime): session = runtime
         }
         guard session.id != caller?.id else { return ToolResult(text: "Uma sessão não fecha a si mesma.", isError: true) }
-        return model.recycler.close(session)
-    }
-
-    private func recycleSelf(_ args: JSONValue) -> ToolResult {
-        if let refusal = refuseExtra(args, allowed: []) { return refusal }
-        guard let caller else { return noCaller }
-        return model.recycler.requestSelf(caller)
-    }
-
-    private func recycleSession(_ args: JSONValue) -> ToolResult {
-        if let refusal = refuseExtra(args, allowed: ["session"]) { return refusal }
-        let session: SessionRuntime
-        switch target(args["session"]?.stringValue) {
-        case .failure(let result): return result
-        case .found(let runtime): session = runtime
+        let folder = session.cwd ?? model.project(session.projectId)?.project.path
+        let git = folder.map { GitState.read(cwd: $0) } ?? .failed("pasta da sessão desconhecida")
+        if let refusal = CloseRefusal.check(status: session.status, git: git) {
+            return ToolResult(text: refusal.message, isError: true)
         }
-        guard session.id != caller?.id else {
-            return ToolResult(text: "Esta é a própria sessão: use recycle_self, que espera o turno terminar.", isError: true)
+        let conversation = session.hasConversation ? session.claudeSessionId : nil
+        let transcript = conversation.flatMap { TranscriptLocator.find(conversation: $0, hint: session.transcriptPath, root: Self.projectsRoot) }
+        let label = model.displayLabel(session)
+        let log = CloseLog()
+        do {
+            try log.append(CloseRecord(session: session.id.uuidString, label: label, cwd: folder, conversation: conversation,
+                                       transcript: transcript, contextTokens: model.tokens.context(session)))
+        } catch {
+            return ToolResult(text: "Recusado: não consegui registrar em \(log.url.path) (\(error.localizedDescription)); nada foi fechado.", isError: true)
         }
-        return model.recycler.requestSession(session)
+        model.closeSession(session.id)
+        let kept = transcript.map { " A conversa continua em \($0)." } ?? ""
+        return ToolResult(text: "Fechei \(label) e registrei em closes.jsonl.\(kept)")
     }
 }

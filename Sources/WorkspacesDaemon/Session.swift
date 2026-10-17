@@ -74,27 +74,6 @@ public struct ServerSessionRecord: Codable, Equatable, Sendable {
     }
 }
 
-/// Where a recycle is, as list_sessions shows it.
-extension RecycleProgress {
-    var text: String {
-        switch self {
-        case .scheduled: return "reciclagem agendada para o fim do turno"
-        case .waking: return "acordando para reciclar"
-        case .clearing: return "reciclando: /clear enviado"
-        case .delayed: return "reciclando: o /clear não respondeu, esperando"
-        case .resuming: return "reciclando: retomada enviada"
-        case .waitingTurn: return "reciclando: retomada espera o turno em curso"
-        case .done: return "reciclada"
-        case .failed(let reason): return "reciclagem falhou: \(reason)"
-        }
-    }
-
-    var isFailure: Bool {
-        if case .failed = self { return true }
-        return false
-    }
-}
-
 /// A session while the daemon runs.
 final class ServerSession {
     var record: ServerSessionRecord
@@ -108,12 +87,10 @@ final class ServerSession {
     /// Exact context from the status line.
     var contextTokens: Int?
     var contextSize: Int?
-    var recycle: RecycleProgress?
     /// A recado for a hibernated session, typed once it is back.
     var pendingPaste: String?
     /// The account hit its limit in this session's last turn: "continue" is sent after this moment.
     var rateLimitedUntil: Date?
-    var handoffReminder: (conversation: String, tokens: Int?)?
     /// When the session last started, to answer Claude Code's first screens (folder trust).
     var startedAt: Date?
 

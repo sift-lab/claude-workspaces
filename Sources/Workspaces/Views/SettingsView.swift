@@ -188,22 +188,6 @@ private struct GeneralPane: View {
                     minutesPicker($model.config.hibernateAfterMinutes, options: [0, 15, 30, 60, 120])
                 }
             }
-            SettingsGroup(title: "Contexto") {
-                FormRow(title: "Pedir passagem acima de",
-                        subtitle: "A sessão aparece como precisa de passagem e recebe um aviso a cada 50 mil a mais", last: true) {
-                    Picker("", selection: $model.config.handoffContextTokens) {
-                        ForEach([150_000, 200_000, 250_000, 300_000, 400_000], id: \.self) { tokens in
-                            Text(TokenFormat.tokens(tokens)).tag(tokens)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 130)
-                }
-            }
-            Text("Acima de \(TokenFormat.tokens(ContextLimits.defaultAlarm)) a marca fica vermelha e chega uma notificação. O modelo nunca é trocado e nada é compactado de propósito: a compactação resume sozinha e perde detalhe.")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.tertiary)
-                .padding(.top, -16)
             SettingsGroup(title: "Arquivo de configuração") {
                 FormRow(title: AppPaths.configFile.path, last: true) {
                     Button("Mostrar no Finder") { NSWorkspace.shared.activateFileViewerSelecting([AppPaths.configFile]) }
@@ -328,8 +312,6 @@ private struct ClaudePane: View {
         "send_message": ("Mandar recado", "Digita na caixa de outra sessão, sem enviar"),
         "notify": ("Pedir sua atenção", "Notificação com uma frase"),
         "close_session": ("Fechar sessões", "Encerra uma sessão parada do mesmo workspace, só sem mudança fora de commit"),
-        "recycle_self": ("Recomeçar a própria conversa", "Depois da Passagem no FRENTE.md: registra, limpa e retoma pela passagem"),
-        "recycle_session": ("Recomeçar outra sessão", "O mesmo, pedido por uma orquestradora, com a sessão parada"),
     ]
 
     var body: some View {

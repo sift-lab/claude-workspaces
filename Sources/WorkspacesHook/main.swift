@@ -28,6 +28,6 @@ if arguments.first == "statusline" {
     let payload = JSONValue.parse(data) ?? .null
     let reply = try? IPCClient.send(IPCRequest(kind: .hook, session: session, payload: payload,
                                                launch: ProcessInfo.processInfo.environment[ClaudeLaunch.launchEnvKey]), timeout: 2)
-    // The app answers some hooks with JSON for Claude Code (context to add); the rest get "".
+    // Only a JSON object the app sends on purpose reaches Claude Code; today every hook gets "".
     if let text = HookReply.stdout(reply) { FileHandle.standardOutput.write(Data(text.utf8)) }
 }
