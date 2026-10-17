@@ -102,12 +102,12 @@ final class TerminalHost: NSObject, LocalProcessTerminalViewDelegate {
         view.send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
     }
 
-    /// Types text as the keyboard would, for a slash command. Only the recycle uses it, with fixed text.
+    /// Types text as the keyboard would, for a slash command.
     func type(_ text: String) {
         view.send(txt: text)
     }
 
-    /// Enter: sends what is in the prompt. Only the recycle uses it, after its own fixed text.
+    /// Enter: sends what is in the prompt.
     func pressReturn() {
         view.send(txt: "\r")
     }
@@ -151,7 +151,7 @@ final class TerminalHost: NSObject, LocalProcessTerminalViewDelegate {
         return Array(lines.suffix(count))
     }
 
-    /// The same lines cell by cell, with what the recycle's input check reads: faint and inverse.
+    /// The same lines cell by cell, with what the input check (PromptScreen) reads: faint and inverse.
     func screen(lines count: Int) -> [ScreenLine] {
         let terminal = view.getTerminal()
         var lines: [ScreenLine] = []

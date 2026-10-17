@@ -366,6 +366,13 @@ public final class TranscriptScanner: @unchecked Sendable {
 
 // MARK: One session
 
+public enum ContextFormat {
+    /// "963k", the way list_sessions and the sidebar write a context.
+    public static func short(_ tokens: Int) -> String {
+        "\(Int((Double(tokens) / 1000).rounded()))k"
+    }
+}
+
 public struct ContextPoint: Equatable, Sendable, Identifiable {
     public var time: Date
     public var tokens: Int

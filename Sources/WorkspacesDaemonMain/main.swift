@@ -8,13 +8,12 @@ import WorkspacesDaemon
 //   workspacesd status                     every session
 //   workspacesd open <pasta|projeto> [--prompt T] [--conta C] [--modelo M] [--worktree W]
 //   workspacesd send <sessão> <texto>      pastes and presses Enter
-//   workspacesd recycle <sessão>
 //   workspacesd close <sessão>
 //   workspacesd tool <nome> ['{json}']     any MCP tool, as no session
 
 let usage = """
 uso: workspacesd serve | mcp | status | open <pasta|projeto> [--prompt T] [--conta C] [--modelo M] [--worktree W]
-     | send <sessão> <texto> | recycle <sessão> | close <sessão> | tool <nome> ['{json}']
+     | send <sessão> <texto> | close <sessão> | tool <nome> ['{json}']
 """
 
 /// Files live in ~/.workspaces unless WORKSPACES_HOME says otherwise. The hook and the MCP bridge
@@ -63,8 +62,7 @@ func serve() -> Never {
                     try? handle.close()
                 }
             }
-            let gh = PullRequestLookup.locate(path: ProcessInfo.processInfo.environment["PATH"])
-            let daemon = try Daemon(paths: paths, helpers: .init(daemon: executable.path, hook: hook, gh: gh),
+            let daemon = try Daemon(paths: paths, helpers: .init(daemon: executable.path, hook: hook),
                                     terminal: TmuxTerminal(), scheduler: QueueScheduler(queue: queue), notifier: notifier,
                                     baseEnvironment: ProcessInfo.processInfo.environment)
             try daemon.start()
@@ -132,9 +130,6 @@ case "open":
 case "send":
     guard args.count >= 2 else { fail(usage) }
     tool("send_message", ["session": .string(args[0]), "text": .string(args.dropFirst().joined(separator: " "))])
-case "recycle":
-    guard args.count == 1 else { fail(usage) }
-    tool("recycle_session", ["session": .string(args[0])])
 case "close":
     guard args.count == 1 else { fail(usage) }
     tool("close_session", ["session": .string(args[0])])

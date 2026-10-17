@@ -1,8 +1,8 @@
 import Foundation
 import WorkspacesCore
 
-/// The Workspaces app without a screen: Claude Code sessions in tmux, the same MCP tools, the
-/// same hooks and the same recycle rule from WorkspacesCore. Not thread safe: everything runs on
+/// The Workspaces app without a screen: Claude Code sessions in tmux, the same MCP tools and the
+/// same hooks from WorkspacesCore. Not thread safe: everything runs on
 /// one queue (the IPC server hops onto it), and tests call it directly.
 public final class Daemon {
     public struct Paths {
@@ -12,7 +12,7 @@ public final class Daemon {
         public var sessions: URL { home.appendingPathComponent("server-sessions.json") }
         public var settings: URL { home.appendingPathComponent("claude-settings.json") }
         public var mcp: URL { home.appendingPathComponent("claude-mcp.json") }
-        public var recycleLog: URL { home.appendingPathComponent("recycles.jsonl") }
+        public var closeLog: URL { home.appendingPathComponent("closes.jsonl") }
         public var conversationLog: URL { home.appendingPathComponent("conversations.jsonl") }
         public var eventLog: URL { home.appendingPathComponent("workspacesd.log") }
 
@@ -25,13 +25,10 @@ public final class Daemon {
     public struct Helpers {
         public var daemon: String
         public var hook: String
-        /// gh, for the open pull request in a recycle's handoff; nil leaves it out.
-        public var gh: String?
 
-        public init(daemon: String, hook: String, gh: String? = nil) {
+        public init(daemon: String, hook: String) {
             self.daemon = daemon
             self.hook = hook
-            self.gh = gh
         }
     }
 
@@ -41,6 +38,8 @@ public final class Daemon {
     static let rateLimitFallback: TimeInterval = 30 * 60
     static let trustChecks = 10
     static let trustInterval: TimeInterval = 2
+    static let git = ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/bin/git"
 
     let paths: Paths
     let helpers: Helpers
@@ -52,7 +51,6 @@ public final class Daemon {
     private(set) var config: AppConfig
     private(set) var server: ServerConfig
     var sessions: [ServerSession] = []
-    private(set) var recycler: ServerRecycler!
     private var readings: [String: LimitReadings] = [:]
     private var tickWork: ScheduledWork?
 
@@ -83,12 +81,10 @@ public final class Daemon {
             let records = try JSONDecoder().decode([ServerSessionRecord].self, from: data)
             sessions = records.map { ServerSession(record: $0, now: scheduler.now) }
         }
-        recycler = ServerRecycler(daemon: self, log: RecycleLog(url: paths.recycleLog))
     }
 
-    /// Writes the files Claude Code is pointed at, adopts the sessions still running in tmux, marks
-    /// the rest hibernated (they come back with --resume when opened or messaged) and finishes the
-    /// recycles a restart interrupted.
+    /// Writes the files Claude Code is pointed at, adopts the sessions still running in tmux and marks
+    /// the rest hibernated (they come back with --resume when opened or messaged).
     public func start() throws {
         try writeClaudeFiles()
         for session in sessions where !session.hibernated {
@@ -99,7 +95,6 @@ public final class Daemon {
             }
         }
         saveSessions()
-        recycler.recover()
         scheduleTick()
     }
 
@@ -308,7 +303,6 @@ public final class Daemon {
     }
 
     func close(_ session: ServerSession) {
-        recycler.forget(session.id)
         terminal.kill(session.terminalName)
         sessions.removeAll { $0.id == session.id }
         saveSessions()
@@ -348,12 +342,11 @@ public final class Daemon {
         let caller = request.session.flatMap(UUID.init(uuidString:)).flatMap { session($0) }
         switch request.kind {
         case .hook:
-            var output = ""
             if let caller, let payload = request.payload,
                request.launch.flatMap(Int.init) ?? caller.record.launch == caller.record.launch {
-                output = applyHook(payload, to: caller) ?? ""
+                applyHook(payload, to: caller)
             }
-            return IPCResponse(ok: true, text: output)
+            return IPCResponse(ok: true, text: "")
         case .tools:
             return IPCResponse(ok: true, text: "", enabledTools: enabledTools)
         case .statusLine:
@@ -376,8 +369,8 @@ public final class Daemon {
         ServerTools.all.map(\.name).filter { !config.disabledTools.contains($0) }
     }
 
-    func applyHook(_ payload: JSONValue, to session: ServerSession) -> String? {
-        guard let update = HookEvent.update(from: payload) else { return nil }
+    func applyHook(_ payload: JSONValue, to session: ServerSession) {
+        guard let update = HookEvent.update(from: payload) else { return }
         let now = scheduler.now
         if let path = update.transcriptPath { session.transcriptPath = path }
         if update.status == .idle, let text = session.pendingPaste {
@@ -415,26 +408,6 @@ public final class Daemon {
         if let cwd = update.cwd { session.record.cwd = cwd }
         session.record.claudeSessionId = session.conversation.resumable
         if session.record != saved { saveSessions() }
-
-        var output: String?
-        switch update.event {
-        case "SessionStart" where update.source == "clear":
-            output = recycler.sessionStartContext(for: session)
-        case "PostToolUse", "UserPromptSubmit":
-            output = handoffReminder(session, event: update.event)
-        default:
-            break
-        }
-        recycler.hook(update, session: session)
-        return output
-    }
-
-    private func handoffReminder(_ session: ServerSession, event: String) -> String? {
-        guard let conversation = session.claudeSessionId, !recycler.isBusy(session) else { return nil }
-        var last = session.handoffReminder?.conversation == conversation ? session.handoffReminder?.tokens : nil
-        let text = config.contextLimits.reminder(tokens: session.contextTokens, lastWarned: &last)
-        session.handoffReminder = (conversation, last)
-        return text.map { HookOutput.additionalContext(event: event, $0) }
     }
 
     func receive(_ reading: StatusLineReading, from session: ServerSession) {
@@ -443,7 +416,6 @@ public final class Daemon {
             session.contextSize = reading.contextSize
         }
         if reading.fiveHour != nil || reading.sevenDay != nil { record(reading, account: session.record.account) }
-        recycler.statusLine(reading, session: session)
     }
 
     // MARK: The account's limit
@@ -536,7 +508,7 @@ public final class Daemon {
                 }
                 continue
             }
-            guard !recycler.isBusy(session), session.rateLimitedUntil == nil, session.pendingPaste == nil else { continue }
+            guard session.rateLimitedUntil == nil, session.pendingPaste == nil else { continue }
             let facts = SleepPolicy.Session(
                 status: session.status, attention: session.attention, visible: false,
                 quietFor: now.timeIntervalSince(session.lastChange), state: .awake,

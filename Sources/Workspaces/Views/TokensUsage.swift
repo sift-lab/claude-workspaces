@@ -433,12 +433,10 @@ private struct SessionNowRow: View {
                 }
                 .frame(width: 200, alignment: .leading)
                 HStack(spacing: 10) {
-                    let level = model.contextLimits.level(context)
-                    FillBar(fraction: Double(context) / Double(limit), width: 80,
-                            fill: level == .alarm ? Theme.alarm : (level == .needsHandoff ? Theme.primary : Theme.secondary))
+                    FillBar(fraction: Double(context) / Double(limit), width: 80, fill: Theme.secondary)
                     Text(TokenFormat.tokens(context))
-                        .font(.system(size: 12, weight: level != .normal ? .semibold : .regular).monospacedDigit())
-                        .foregroundStyle(level == .alarm ? Theme.alarm : Theme.primary)
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Theme.primary)
                 }
                 .frame(width: 170, alignment: .leading)
                 HStack(spacing: 10) {
@@ -474,9 +472,6 @@ private struct SessionNowRow: View {
         let tokens = model.tokens
         if session.sleep != .awake {
             SleepTag(sleep: session.sleep)
-        } else if model.contextLimits.level(tokens.context(session)) != .normal {
-            pill("Precisa de passagem", strong: true)
-                .help(ContextText.help(tokens.context(session) ?? 0, model.contextLimits))
         } else if tokens.risingFast(session) {
             HStack(spacing: 5) { RisingArrow(); Text("Subindo rápido") }.pillStyle(strong: true)
         } else if let agents = s?.activeAgents, agents > 0 {

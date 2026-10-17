@@ -91,16 +91,3 @@ public enum HookReply {
         return text + "\n"
     }
 }
-
-/// Hook output that adds context for Claude (`hookSpecificOutput.additionalContext`).
-public enum HookOutput {
-    public static func additionalContext(event: String, _ text: String) -> String {
-        let value = JSONValue.object(["hookSpecificOutput": .object([
-            "hookEventName": .string(event),
-            "additionalContext": .string(text),
-        ])])
-        var line = value.encodedLine()
-        line.removeLast()
-        return String(decoding: line, as: UTF8.self)
-    }
-}
