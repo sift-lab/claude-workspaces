@@ -324,6 +324,19 @@ public enum PromptScreen {
         return String(cells.filter { !$0.faint }.map(\.character)).trimmingCharacters(in: .whitespaces)
     }
 
+    /// Blanks between a typed command and the description Claude Code draws after it.
+    static let hintGap = 3
+
+    /// What is typed, with the description of `command` left out: Claude Code draws it on the
+    /// input line, not faint, after a run of blanks. Only right after exactly `command`: a draft
+    /// before it, or one blank after it, is still typed text.
+    public static func typedInput(_ lines: [ScreenLine], after command: String) -> String? {
+        guard let typed = typedInput(lines) else { return nil }
+        guard typed.hasPrefix(command) else { return typed }
+        let gap = typed.dropFirst(command.count).prefix { $0.isWhitespace }.count
+        return gap >= hintGap ? command : typed
+    }
+
     private static func inputCells(_ lines: [ScreenLine]) -> ArraySlice<ScreenCell>? {
         for index in lines.indices.reversed() where index > 0 {
             let above = lines[index - 1].cells.drop { $0.character == " " }

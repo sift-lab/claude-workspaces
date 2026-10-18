@@ -587,4 +587,29 @@ private func refusal(_ result: Result<HandoffSection, RecycleRefusal>) -> Recycl
         #expect(PromptScreen.typedInput([ScreenLine(rule), ScreenLine(cells: faint), ScreenLine(rule)]) == "")
         #expect(PromptScreen.typedInput([ScreenLine("nada")]) == nil)
     }
+
+    // Claude Code draws the suggested command's description on the input line, not faint, after
+    // a run of blanks (28 on the screen of 18/10).
+    private let hint = String(repeating: " ", count: 28)
+        + "Start a new session with empty context; previous session stays on disk (resumable with /resume)"
+
+    private func input(_ text: String) -> [ScreenLine] {
+        [ScreenLine(rule), ScreenLine("❯ " + text), ScreenLine(rule)]
+    }
+
+    @Test func theCommandsHintIsNotTyped() {
+        #expect(PromptScreen.typedInput(input("/clear" + hint), after: "/clear") == "/clear")
+        #expect(PromptScreen.typedInput(input("/clear   Start a new session"), after: "/clear") == "/clear")
+        #expect(PromptScreen.typedInput(input("/clear\u{A0}\u{A0}\u{A0}Start a new session"), after: "/clear") == "/clear")
+        #expect(PromptScreen.typedInput(input("/clear"), after: "/clear") == "/clear")
+        #expect(PromptScreen.typedInput(input(""), after: "/clear") == "")
+        #expect(PromptScreen.typedInput([ScreenLine("nada")], after: "/clear") == nil)
+    }
+
+    @Test func aDraftNextToTheCommandIsTyped() {
+        #expect(PromptScreen.typedInput(input("rascunho /clear" + hint), after: "/clear") == "rascunho /clear" + hint)
+        #expect(PromptScreen.typedInput(input("/clear rascunho" + hint), after: "/clear") == "/clear rascunho" + hint)
+        #expect(PromptScreen.typedInput(input("/clear  rascunho"), after: "/clear") == "/clear  rascunho")
+        #expect(PromptScreen.typedInput(input("/clearrascunho" + hint), after: "/clear") == "/clearrascunho" + hint)
+    }
 }

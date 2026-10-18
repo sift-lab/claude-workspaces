@@ -265,7 +265,7 @@ public final class RecycleEngine {
             return
         }
         let screen = host.screen(id)
-        let typed = PromptScreen.typedInput(screen)
+        let typed = PromptScreen.typedInput(screen, after: "/clear")
         var gateFacts = facts(id, subject, screen: screen)
         gateFacts.promptEmpty = typed == "/clear"
         let section: HandoffSection
