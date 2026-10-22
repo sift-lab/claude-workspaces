@@ -148,7 +148,7 @@ final class AppModel {
     }
 
     /// The task's tab name, the prompt being named meanwhile, or the branch when the task has no title.
-    private func tabName(_ session: SessionRuntime) -> String {
+    func tabName(_ session: SessionRuntime) -> String {
         if let title = session.title { return title.tab }
         if session.isTerminal { return session.label }
         if let pending = session.titlePending, !pending.isEmpty { return SessionTitle.clean(pending, limit: SessionTitle.tabLimit) }

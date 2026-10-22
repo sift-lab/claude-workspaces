@@ -10,7 +10,7 @@ public struct SessionTitle: Codable, Hashable, Sendable {
     public var pinned: Bool
 
     /// The sidebar row has room for about 18 characters next to the time and the context mark.
-    public static let tabLimit = 22
+    public static let tabLimit = 44
     public static let fullLimit = 90
 
     public init(tab: String, full: String, pinned: Bool = false) {
@@ -75,7 +75,7 @@ public enum TitleCommand: Equatable, Sendable {
 public enum TitlePrompt {
     public static let system = """
     Você dá nome a sessões do Claude Code. Responda só com um objeto JSON, sem texto em volta: \
-    {"aba": "...", "titulo": "..."}. aba: 2 ou 3 palavras, no máximo 18 caracteres, o assunto da sessão. \
+    {"aba": "...", "titulo": "..."}. aba: 3 a 6 palavras, no máximo 40 caracteres, o assunto da sessão. \
     titulo: uma frase objetiva de no máximo 70 caracteres sobre o que a sessão vai fazer. \
     Português do Brasil com a acentuação correta, mesmo que o pedido venha sem acento. \
     Sem travessão, sem emoji, sem ponto final. Use só o que o pedido diz.

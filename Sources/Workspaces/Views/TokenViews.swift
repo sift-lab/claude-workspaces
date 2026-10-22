@@ -79,22 +79,24 @@ struct AgentsLabel: View {
 /// Sidebar row: the context the session carries. Past the limit it reads "passagem", in red past the alarm.
 struct TokenMark: View {
     let session: SessionRuntime
+    var compact = false
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let tokens = model.tokens
         if !session.isTerminal, let context = tokens.context(session) {
             ContextTag(context: context, limits: model.contextLimits,
-                       rising: session.sleep == .awake && tokens.risingFast(session))
+                       rising: session.sleep == .awake && tokens.risingFast(session), compact: compact)
         }
     }
 }
 
-/// "128k", or "412k passagem" past the limit.
+/// "128k", or "412k passagem" past the limit; compact, a dot in place of the word.
 struct ContextTag: View {
     let context: Int
     let limits: ContextLimits
     var rising = false
+    var compact = false
 
     var body: some View {
         let level = limits.level(context)
@@ -104,7 +106,9 @@ struct ContextTag: View {
             if level == .alarm { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9)) }
             Text(ContextLimits.short(context))
                 .font(.system(size: 11, weight: level == .normal ? .regular : .semibold).monospacedDigit())
-            if level != .normal { Text("passagem").font(.system(size: 11)) }
+            if level != .normal {
+                if compact { Circle().frame(width: 5, height: 5) } else { Text("passagem").font(.system(size: 11)) }
+            }
         }
         // The session's name truncates; the mark never wraps.
         .fixedSize()
