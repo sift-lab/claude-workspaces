@@ -101,7 +101,8 @@ final class SessionTitler {
     /// `replacingKept`: asked for by the person, so the answer replaces a kept title.
     private func generate(_ runtime: SessionRuntime, prompts: [String], given: String? = nil, replacingKept: Bool = false) {
         guard let (_, project) = model.project(runtime.projectId) else { return }
-        let env = model.toolEnvironment
+        // In the account sessions start in: the one in use may be the one that is spent.
+        let env = model.activeAccount.environment(model.toolEnvironment)
         guard let words = ShellSupport.words(model.config.claudeCommand), let first = words.first,
               let executable = ShellSupport.resolve(first, path: env["PATH"]) else { return }
         runtime.titleRequest += 1

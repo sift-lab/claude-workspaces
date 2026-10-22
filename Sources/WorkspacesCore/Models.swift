@@ -116,6 +116,10 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var generateTitles: Bool
     /// The model that names tasks, as `claude --model` takes it.
     public var titleModel: String
+    /// The Claude Code logins the sessions can run in. Empty: Claude Code's default login only.
+    public var accounts: [ClaudeAccount]
+    /// The account sessions start in, by name; the first one when nil or gone.
+    public var activeAccount: String?
 
     public static let defaultDisabledTools = ["close_session"]
 
@@ -123,7 +127,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
                 disabledTools: [String] = AppConfig.defaultDisabledTools, claudeCommand: String = "claude",
                 freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30,
                 handoffContextTokens: Int = ContextLimits.defaultHandoff, generateTitles: Bool = true,
-                titleModel: String = "haiku") {
+                titleModel: String = "haiku", accounts: [ClaudeAccount] = [], activeAccount: String? = nil) {
         self.workspaces = workspaces
         self.notifyWhenWaiting = notifyWhenWaiting
         self.reopenSessions = reopenSessions
@@ -134,9 +138,17 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.handoffContextTokens = handoffContextTokens
         self.generateTitles = generateTitles
         self.titleModel = titleModel
+        self.accounts = accounts
+        self.activeAccount = activeAccount
     }
 
     public var contextLimits: ContextLimits { ContextLimits(handoff: handoffContextTokens) }
+
+    /// The account sessions start in. With no accounts set, Claude Code's default login, named `fallback`.
+    public func currentAccount(fallback: String) -> ClaudeAccount {
+        accounts.first { $0.name == activeAccount } ?? accounts.first
+            ?? ClaudeAccount(id: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!, name: fallback)
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -150,6 +162,8 @@ public struct AppConfig: Codable, Equatable, Sendable {
         handoffContextTokens = try c.decodeIfPresent(Int.self, forKey: .handoffContextTokens) ?? ContextLimits.defaultHandoff
         generateTitles = try c.decodeIfPresent(Bool.self, forKey: .generateTitles) ?? true
         titleModel = try c.decodeIfPresent(String.self, forKey: .titleModel) ?? "haiku"
+        accounts = try c.decodeIfPresent([ClaudeAccount].self, forKey: .accounts) ?? []
+        activeAccount = try c.decodeIfPresent(String.self, forKey: .activeAccount)
     }
 }
 

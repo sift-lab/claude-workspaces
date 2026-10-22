@@ -39,6 +39,8 @@ final class SessionRuntime: Identifiable {
     @ObservationIgnored var lastSeen = Date()
     /// Increases on every launch; hooks from an older process carry an older number.
     @ObservationIgnored var launch = 0
+    /// The account the running Claude was started in; nil before the first launch.
+    @ObservationIgnored var account: String?
     /// Which conversation Claude is in, and which one `claude --resume` opens; fed by every hook.
     var conversation = ConversationTracker(saved: nil)
     var claudeSessionId: String? { conversation.current }

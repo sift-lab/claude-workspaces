@@ -64,7 +64,7 @@ public struct ConversationTracker: Equatable, Sendable {
 
     static func carriesAMessage(_ update: HookUpdate) -> Bool {
         switch update.event {
-        case "UserPromptSubmit", "PostToolUse", "Stop": return true
+        case "UserPromptSubmit", "PostToolUse", "Stop", "StopFailure": return true
         // A permission request is about a tool call, so a turn is under way.
         case "Notification": return update.status == .waiting
         default: return false

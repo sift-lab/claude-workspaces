@@ -137,6 +137,15 @@ private struct WorkspaceMenuItems: View {
             Button(workspace.name) { openWindow(id: "workspace", value: workspace.id) }
                 .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .control)
         }
+        if model.config.accounts.count > 1 {
+            Divider()
+            Picker("Conta do Claude", selection: Binding(
+                get: { model.activeAccount.name },
+                set: { model.accounts.switchTo($0) }
+            )) {
+                ForEach(model.config.accounts) { account in Text(account.name).tag(account.name) }
+            }
+        }
     }
 }
 
