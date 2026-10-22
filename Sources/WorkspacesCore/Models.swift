@@ -17,15 +17,21 @@ public struct SavedSession: Codable, Hashable, Identifiable, Sendable {
     public var cwd: String?
     /// A plain shell instead of Claude, reopened in `cwd`.
     public var terminal: Bool
+    /// What the current task is about; nil until its first prompt, and again after a /clear.
+    public var title: SessionTitle?
+    /// Tab names of the tasks this session had before a /clear, newest first.
+    public var titleHistory: [String]
 
     public init(id: UUID, label: String, claudeSessionId: String? = nil, worktree: String? = nil, cwd: String? = nil,
-                terminal: Bool = false) {
+                terminal: Bool = false, title: SessionTitle? = nil, titleHistory: [String] = []) {
         self.id = id
         self.label = label
         self.claudeSessionId = claudeSessionId
         self.worktree = worktree
         self.cwd = cwd
         self.terminal = terminal
+        self.title = title
+        self.titleHistory = titleHistory
     }
 
     public init(from decoder: Decoder) throws {
@@ -36,6 +42,8 @@ public struct SavedSession: Codable, Hashable, Identifiable, Sendable {
         worktree = try c.decodeIfPresent(String.self, forKey: .worktree)
         cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
         terminal = try c.decodeIfPresent(Bool.self, forKey: .terminal) ?? false
+        title = try c.decodeIfPresent(SessionTitle.self, forKey: .title)
+        titleHistory = try c.decodeIfPresent([String].self, forKey: .titleHistory) ?? []
     }
 }
 
@@ -104,13 +112,18 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var hibernateAfterMinutes: Int
     /// Context (tokens) above which a session "precisa de passagem".
     public var handoffContextTokens: Int
+    /// Names each task on its first prompt with a small model (`claude -p`); `/titulo` works either way.
+    public var generateTitles: Bool
+    /// The model that names tasks, as `claude --model` takes it.
+    public var titleModel: String
 
     public static let defaultDisabledTools = ["close_session"]
 
     public init(workspaces: [Workspace] = [], notifyWhenWaiting: Bool = true, reopenSessions: Bool = true,
                 disabledTools: [String] = AppConfig.defaultDisabledTools, claudeCommand: String = "claude",
                 freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30,
-                handoffContextTokens: Int = ContextLimits.defaultHandoff) {
+                handoffContextTokens: Int = ContextLimits.defaultHandoff, generateTitles: Bool = true,
+                titleModel: String = "haiku") {
         self.workspaces = workspaces
         self.notifyWhenWaiting = notifyWhenWaiting
         self.reopenSessions = reopenSessions
@@ -119,6 +132,8 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.freezeAfterMinutes = freezeAfterMinutes
         self.hibernateAfterMinutes = hibernateAfterMinutes
         self.handoffContextTokens = handoffContextTokens
+        self.generateTitles = generateTitles
+        self.titleModel = titleModel
     }
 
     public var contextLimits: ContextLimits { ContextLimits(handoff: handoffContextTokens) }
@@ -133,6 +148,8 @@ public struct AppConfig: Codable, Equatable, Sendable {
         freezeAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .freezeAfterMinutes) ?? 2
         hibernateAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateAfterMinutes) ?? 30
         handoffContextTokens = try c.decodeIfPresent(Int.self, forKey: .handoffContextTokens) ?? ContextLimits.defaultHandoff
+        generateTitles = try c.decodeIfPresent(Bool.self, forKey: .generateTitles) ?? true
+        titleModel = try c.decodeIfPresent(String.self, forKey: .titleModel) ?? "haiku"
     }
 }
 

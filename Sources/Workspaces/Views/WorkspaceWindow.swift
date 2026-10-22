@@ -4,10 +4,11 @@ import WorkspacesCore
 
 enum DetailMode: Hashable { case single, grid }
 
-/// What a workspace window can open, for the ⌘T and ⇧⌘T menu items.
+/// What a workspace window can open, for the ⌘T, ⌥⌘T and ⇧⌘T menu items.
 struct WorkspaceActions {
     var workspaceId: UUID
     var newSession: () -> Void
+    var newSessionInProjectFolder: () -> Void
     var newTerminal: () -> Void
 }
 
@@ -80,7 +81,8 @@ struct WorkspaceWindow: View {
         // The terminal (an AppKit view) holds the keyboard focus, so SwiftUI's focused values never
         // reach the menu; the window registers itself and the menu asks for the key window instead.
         .background(WindowReader { window in
-            model.register(WorkspaceActions(workspaceId: workspaceId, newSession: openSession, newTerminal: openTerminal), for: window)
+            model.register(WorkspaceActions(workspaceId: workspaceId, newSession: openSession,
+                                            newSessionInProjectFolder: openSessionInProjectFolder, newTerminal: openTerminal), for: window)
         })
         .onChange(of: model.focusRequest?.session) { _, _ in
             guard let request = model.focusRequest, request.workspace == workspaceId else { return }
@@ -99,9 +101,17 @@ struct WorkspaceWindow: View {
         model.session(selection)?.projectId ?? model.workspace(workspaceId)?.projects.first?.id
     }
 
-    /// ⌘T: a new Claude session in the current project, shown right away.
+    /// ⌘T: a new Claude session where the shown one works (its worktree included), shown right away.
     private func openSession() {
-        guard let project = currentProject, let runtime = model.newSession(projectId: project) else { return }
+        let shown = model.session(selection)
+        guard let runtime = shown.map(model.newSession(besides:)) ?? currentProject.flatMap({ model.newSession(projectId: $0) }) else { return }
+        selection = runtime.id
+        mode = .single
+    }
+
+    /// ⌥⌘T: a new Claude session in the project folder itself, whatever the shown one is on.
+    private func openSessionInProjectFolder() {
+        guard let project = currentProject, let runtime = model.newSession(projectId: project, mode: .folder) else { return }
         selection = runtime.id
         mode = .single
     }
@@ -129,6 +139,7 @@ private struct Sidebar: View {
     @Binding var mode: DetailMode
     @Environment(AppModel.self) private var model
     @State private var collapsed: Set<UUID> = []
+    @State private var renaming: SessionRuntime?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -167,6 +178,9 @@ private struct Sidebar: View {
             .padding(10)
         }
         .background(Theme.sidebar)
+        .sheet(item: $renaming) { session in
+            RenameSessionForm(session: session) { renaming = nil }
+        }
     }
 
     private func projectHeader(_ project: Project) -> some View {
@@ -215,7 +229,8 @@ private struct Sidebar: View {
                     .font(.system(size: 13, weight: session.needsYou ? .semibold : (selected ? .medium : .regular)))
                     .foregroundStyle(session.needsYou || selected ? Theme.primary : (session.status == .working ? Theme.support : Theme.secondary))
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    // A branch keeps its end ("feat/q…-email"); a title reads from the start.
+                    .truncationMode(session.title == nil ? .middle : .tail)
                 Spacer(minLength: 4)
                 TokenMark(session: session)
                 if session.sleep != .awake {
@@ -233,14 +248,24 @@ private struct Sidebar: View {
             .frame(height: 28)
         }
         .buttonStyle(RowButtonStyle(selected: selected))
-        .help(session.detail)
+        .help(model.tooltip(session))
         .contextMenu {
+            if !session.isTerminal {
+                Button("Renomear…") { renaming = session }
+                Button("Gerar título de novo") { model.titler.regenerate(session) }
+                    .disabled(!session.hasConversation)
+                if let title = session.title {
+                    Toggle("Manter este título", isOn: Binding(get: { title.pinned }, set: { model.titler.setKept(session, $0) }))
+                }
+                Divider()
+            }
             if !session.host.isRunning, session.sleep != .hibernated { Button("Abrir de novo") { model.restart(session.id) } }
             if session.sleep != .awake {
                 Button("Acordar") { model.wake(session.id) }
             } else if session.host.isRunning, !model.isOnScreen(session.id) {
                 Button(session.hasConversation ? "Hibernar agora" : "Congelar agora") { model.sleepNow(session.id) }
             }
+            Button("Nova sessão aqui") { select(model.newSession(besides: session)) }
             Button("Nova sessão neste projeto") { newSession(in: session.projectId) }
             if !session.isTerminal {
                 Button("Abrir terminal na pasta desta sessão") { newTerminal(in: session.projectId, folder: session.cwd) }
@@ -251,10 +276,13 @@ private struct Sidebar: View {
     }
 
     private func newSession(in projectId: UUID) {
-        if let runtime = model.newSession(projectId: projectId) {
-            selection = runtime.id
-            mode = .single
-        }
+        select(model.newSession(projectId: projectId))
+    }
+
+    private func select(_ runtime: SessionRuntime?) {
+        guard let runtime else { return }
+        selection = runtime.id
+        mode = .single
     }
 
     private func newTerminal(in projectId: UUID, folder: String? = nil) {
@@ -322,41 +350,50 @@ private struct DetailToolbar: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 12) {
-            if mode == .grid {
-                Text(model.workspace(workspaceId)?.name ?? "").font(.system(size: 13, weight: .semibold))
-                Text(gridSummary).font(.system(size: 12)).foregroundStyle(Theme.tertiary)
-            } else if let session = model.session(selection) {
-                HStack(spacing: 6) {
-                    Text(model.project(session.projectId)?.project.name ?? "").foregroundStyle(Theme.tertiary)
-                    Text("/").foregroundStyle(Theme.faint)
-                    Text(model.displayLabel(session)).fontWeight(.semibold).foregroundStyle(Theme.primary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                if mode == .grid {
+                    Text(model.workspace(workspaceId)?.name ?? "").font(.system(size: 13, weight: .semibold))
+                    Text(gridSummary).font(.system(size: 12)).foregroundStyle(Theme.tertiary)
+                } else if let session = model.session(selection) {
+                    HStack(spacing: 6) {
+                        Text(model.project(session.projectId)?.project.name ?? "").foregroundStyle(Theme.tertiary)
+                        Text("/").foregroundStyle(Theme.faint)
+                        // A Claude session's name is its title, right below; here goes where it works.
+                        if session.isTerminal {
+                            Text(model.displayLabel(session)).fontWeight(.semibold).foregroundStyle(Theme.primary)
+                        } else {
+                            Text(session.label).foregroundStyle(Theme.support)
+                        }
+                    }
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    if !session.isTerminal { StatusPill(session: session) }
+                    if session.sleep != .awake { SleepTag(sleep: session.sleep) }
+                    ContextMeter(session: session)
+                    UsageBadge(session: session)
                 }
-                .font(.system(size: 13))
-                .lineLimit(1)
-                if !session.isTerminal { StatusPill(session: session) }
-                if session.sleep != .awake { SleepTag(sleep: session.sleep) }
-                ContextMeter(session: session)
-                UsageBadge(session: session)
-                if session.status == .working, let activity = session.activity {
-                    Text(activity).font(.system(size: 12)).foregroundStyle(Theme.secondary).lineLimit(1)
+                Spacer(minLength: 8)
+                SegmentedSwitch(options: [("Uma", DetailMode.single), ("Grade", DetailMode.grid)], selection: $mode)
+                LimitButton()
+                NewTerminalMenu(workspaceId: workspaceId, selection: model.session(selection)) { id in
+                    show(id)
+                }
+                NewSessionMenu(workspaceId: workspaceId, selection: model.session(selection)) { id in
+                    show(id)
                 }
             }
-            Spacer(minLength: 8)
-            SegmentedSwitch(options: [("Uma", DetailMode.single), ("Grade", DetailMode.grid)], selection: $mode)
-            LimitButton()
-            NewTerminalMenu(workspaceId: workspaceId, selection: model.session(selection)) { id in
-                selectTerminal(id)
+            .padding(.leading, 24)
+            .padding(.trailing, 16)
+            .frame(height: 52)
+            if mode == .single, let session = model.session(selection), !session.isTerminal {
+                SessionHeading(session: session)
             }
-            NewSessionMenu(workspaceId: workspaceId, preferredProject: model.session(selection)?.projectId)
         }
-        .padding(.leading, 24)
-        .padding(.trailing, 16)
-        .frame(height: 52)
     }
 
-    /// The window owns the selection; the toolbar asks it to show the new terminal.
-    private func selectTerminal(_ id: UUID) {
+    /// The window owns the selection; the toolbar asks it to show what it opened.
+    private func show(_ id: UUID) {
         model.focusRequest = (workspaceId, id)
     }
 
@@ -464,16 +501,28 @@ private struct NewTerminalMenu: View {
     }
 }
 
+/// Where the shown session works, like ⌘T; the long click also offers the project folder, a new
+/// worktree and the other projects.
 private struct NewSessionMenu: View {
     let workspaceId: UUID
-    let preferredProject: UUID?
+    let selection: SessionRuntime?
+    let opened: (UUID) -> Void
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let projects = model.workspace(workspaceId)?.projects ?? []
+        let current = selection?.projectId ?? projects.first?.id
         Menu {
+            if let selection {
+                Button("Nova sessão aqui (\(selection.label))") { open(model.newSession(besides: selection)) }
+            }
+            if let current {
+                Button("Nova sessão na pasta do projeto") { open(model.newSession(projectId: current, mode: .folder)) }
+                Button("Nova sessão em worktree novo") { open(model.newSession(projectId: current, mode: .worktree)) }
+                Divider()
+            }
             ForEach(projects) { project in
-                Button("Nova sessão em \(project.name)") { model.newSession(projectId: project.id) }
+                Button("Nova sessão em \(project.name)") { open(model.newSession(projectId: project.id)) }
             }
         } label: {
             Image(systemName: "plus")
@@ -482,15 +531,158 @@ private struct NewSessionMenu: View {
                 .frame(width: 28, height: 26)
                 .contentShape(Rectangle())
         } primaryAction: {
-            if let id = preferredProject ?? projects.first?.id { model.newSession(projectId: id) }
+            if let selection { open(model.newSession(besides: selection)) }
+            else if let current { open(model.newSession(projectId: current)) }
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(projects.isEmpty)
-        .help("Nova sessão (clique longo para escolher o projeto)")
+        .help("Nova sessão onde está a sessão aberta (clique longo para outras opções)")
         .accessibilityLabel("Nova sessão")
+    }
+
+    private func open(_ runtime: SessionRuntime?) {
+        if let runtime { opened(runtime.id) }
+    }
+}
+
+/// Below the toolbar: what the task is about and what the session is doing now.
+private struct SessionHeading: View {
+    let session: SessionRuntime
+    @Environment(AppModel.self) private var model
+    @State private var renaming = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(session.title == nil ? Theme.secondary : Theme.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(session.title?.full ?? "")
+                if session.titlePending != nil { GeneratingTag() }
+                if session.title?.pinned == true {
+                    Image(systemName: "pin")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Theme.tertiary)
+                        .help("Título mantido: não é gerado de novo")
+                }
+                Button { renaming = true } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.tertiary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Renomear")
+                .accessibilityLabel("Renomear sessão")
+                .popover(isPresented: $renaming, arrowEdge: .bottom) {
+                    RenameSessionForm(session: session) { renaming = false }
+                }
+            }
+            HStack(spacing: 7) {
+                StatusGlyph(status: session.status, attention: session.attention, size: 10)
+                Text(now)
+                    .foregroundStyle(session.needsYou ? Theme.primary : Theme.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let at = session.activityAt, session.activity != nil, session.status != .waiting {
+                    Text(ago(at)).foregroundStyle(Theme.tertiary).fixedSize()
+                }
+                Spacer(minLength: 8)
+                if session.title == nil, let previous = session.titleHistory.first {
+                    Label("Antes: \(previous)", systemImage: "clock.arrow.circlepath")
+                        .foregroundStyle(Theme.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            .font(.system(size: 12))
+        }
+        .padding(.leading, 24)
+        .padding(.trailing, 16)
+        .padding(.bottom, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var title: String {
+        if let title = session.title { return title.full }
+        if let pending = session.titlePending, !pending.isEmpty { return SessionTitle.clean(pending, limit: 200) }
+        return session.hasConversation ? "Sem título" : "Nova sessão"
+    }
+
+    /// What it is doing, what it waits for, or where it stands.
+    private var now: String {
+        if let recycle = session.recycle, recycle.inProgress || recycle.isFailure { return recycle.text }
+        if session.status == .waiting { return session.message ?? "Esperando você" }
+        if session.attention { return "Pede sua atenção" }
+        if let activity = session.activity { return activity }
+        if session.status == .ended { return "A sessão terminou" }
+        return session.hasConversation ? session.status.label : "Aguardando o primeiro pedido"
+    }
+
+    private func ago(_ date: Date) -> String {
+        let text = RelativeTime.short(since: date, now: model.now)
+        return text == "agora" ? text : "há \(text)"
+    }
+}
+
+private struct GeneratingTag: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini)
+            Text("Gerando título")
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(Theme.secondary)
+        .padding(.horizontal, 8)
+        .frame(height: 20)
+        .background(Capsule().fill(Theme.control))
+    }
+}
+
+/// Renomear: the tab, the title, and whether to keep them from being generated again.
+struct RenameSessionForm: View {
+    let session: SessionRuntime
+    let done: () -> Void
+    @Environment(AppModel.self) private var model
+    @State private var tab = ""
+    @State private var full = ""
+    @State private var keep = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            field("Aba", text: $tab)
+            field("Título", text: $full)
+            Toggle("Manter este título", isOn: $keep).toggleStyle(.checkbox)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancelar", action: done).keyboardShortcut(.cancelAction)
+                Button("Salvar") {
+                    model.titler.rename(session, tab: tab, full: full, keep: keep)
+                    done()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(tab.trimmingCharacters(in: .whitespaces).isEmpty && full.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(width: 360)
+        .onAppear {
+            tab = session.title?.tab ?? ""
+            full = session.title?.full ?? ""
+            keep = session.title?.pinned ?? true
+        }
+    }
+
+    private func field(_ label: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.secondary)
+            TextField(label, text: text).textFieldStyle(.roundedBorder).labelsHidden()
+        }
     }
 }
 

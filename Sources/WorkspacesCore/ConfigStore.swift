@@ -21,6 +21,8 @@ public enum AppPaths {
     }
     public static var claudeSettingsFile: URL { supportDirectory.appendingPathComponent("claude-settings.json") }
     public static var mcpConfigFile: URL { supportDirectory.appendingPathComponent("claude-mcp.json") }
+    /// The plugin every session loads with `--plugin-dir` (the `/workspaces:titulo` command).
+    public static var pluginDirectory: URL { supportDirectory.appendingPathComponent("claude-plugin", isDirectory: true) }
     /// Every recycle and close_session, one JSON line each, never rewritten.
     public static var recycleLogFile: URL { supportDirectory.appendingPathComponent("recycles.jsonl") }
     /// Every change of the conversation a session resumes, one JSON line each.

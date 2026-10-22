@@ -63,19 +63,30 @@ private struct SessionTile: View {
     var body: some View {
         Button(action: action) {
             VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    StatusGlyph(status: session.status, attention: session.attention, terminal: session.isTerminal)
-                    Text(model.displayLabel(session))
-                        .font(.system(size: 12, weight: session.needsYou ? .semibold : .regular))
-                        .foregroundStyle(session.needsYou ? Theme.primary : Theme.support)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(RelativeTime.short(since: session.lastChange, now: model.now))
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.tertiary)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        StatusGlyph(status: session.status, attention: session.attention, terminal: session.isTerminal)
+                        Text(model.displayLabel(session))
+                            .font(.system(size: 12, weight: session.needsYou ? .semibold : .regular))
+                            .foregroundStyle(session.needsYou ? Theme.primary : Theme.support)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(RelativeTime.short(since: session.lastChange, now: model.now))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.tertiary)
+                    }
+                    if !session.isTerminal {
+                        Text(session.label)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .padding(.leading, 20)
+                    }
                 }
                 .padding(.horizontal, 12)
-                .frame(height: 36)
+                .frame(height: 48)
+                .help(model.tooltip(session))
                 Rectangle().fill(Theme.divider).frame(height: 1)
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(session.snapshot.enumerated()), id: \.offset) { _, line in

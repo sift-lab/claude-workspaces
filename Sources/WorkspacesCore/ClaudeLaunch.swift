@@ -62,10 +62,12 @@ public enum ClaudeLaunch {
         public var prompt: String?
         /// Shell fragment the person wrote in the project settings; not quoted on purpose.
         public var extraArguments: String
+        /// The app's plugin (`/workspaces:titulo`), loaded for this session only.
+        public var pluginDir: String?
 
         public init(claudeCommand: String, projectPath: String, settingsFile: String, mcpConfigFile: String,
                     name: String? = nil, resumeId: String? = nil, worktree: String? = nil, prompt: String? = nil,
-                    extraArguments: String = "") {
+                    extraArguments: String = "", pluginDir: String? = nil) {
             self.claudeCommand = claudeCommand
             self.projectPath = projectPath
             self.settingsFile = settingsFile
@@ -75,6 +77,7 @@ public enum ClaudeLaunch {
             self.worktree = worktree
             self.prompt = prompt
             self.extraArguments = extraArguments
+            self.pluginDir = pluginDir
         }
     }
 
@@ -88,6 +91,7 @@ public enum ClaudeLaunch {
 
     private static func ownArguments(_ o: Options, extra: [String]) -> [String] {
         var args = ["--settings", o.settingsFile, "--mcp-config", o.mcpConfigFile] + extra
+        if let plugin = o.pluginDir { args += ["--plugin-dir", plugin] }
         if let resume = o.resumeId {
             args += ["--resume", resume]
         } else {
@@ -99,7 +103,7 @@ public enum ClaudeLaunch {
         return args
     }
 
-    private static let ownFlags: Set<String> = ["--settings", "--mcp-config", "--resume", "--worktree", "--name", "--"]
+    private static let ownFlags: Set<String> = ["--settings", "--mcp-config", "--plugin-dir", "--resume", "--worktree", "--name", "--"]
 
     /// Fallback when `argv` is nil: the login shell runs this. When Claude exits the tab keeps a plain shell.
     public static func shellScript(_ o: Options) -> String {

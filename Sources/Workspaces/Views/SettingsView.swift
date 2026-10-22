@@ -174,8 +174,12 @@ private struct GeneralPane: View {
                         subtitle: "Retoma a conversa de cada sessão com claude --resume") {
                     Toggle("", isOn: $model.config.reopenSessions).labelsHidden().toggleStyle(.switch)
                 }
-                FormRow(title: "Notificar quando uma sessão esperar por você", last: true) {
+                FormRow(title: "Notificar quando uma sessão esperar por você") {
                     Toggle("", isOn: $model.config.notifyWhenWaiting).labelsHidden().toggleStyle(.switch)
+                }
+                FormRow(title: "Dar título a cada tarefa",
+                        subtitle: "No primeiro pedido, o Haiku escreve o nome da aba e o título; /titulo gera de novo ou define", last: true) {
+                    Toggle("", isOn: $model.config.generateTitles).labelsHidden().toggleStyle(.switch)
                 }
             }
             SettingsGroup(title: "Economia") {
