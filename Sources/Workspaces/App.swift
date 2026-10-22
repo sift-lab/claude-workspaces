@@ -114,13 +114,15 @@ private struct WorkspaceCommands: Commands {
     }
 }
 
-/// File menu: ⌘T and ⇧⌘T act on the workspace window in front.
+/// File menu: ⌘T, ⌥⌘T and ⇧⌘T act on the workspace window in front.
 private struct NewSessionItems: View {
     let model: AppModel
 
     var body: some View {
         Button("Nova sessão do Claude") { model.frontWindowActions?.newSession() }
             .keyboardShortcut("t", modifiers: .command)
+        Button("Nova sessão na pasta do projeto") { model.frontWindowActions?.newSessionInProjectFolder() }
+            .keyboardShortcut("t", modifiers: [.command, .option])
         Button("Novo terminal") { model.frontWindowActions?.newTerminal() }
             .keyboardShortcut("t", modifiers: [.command, .shift])
     }

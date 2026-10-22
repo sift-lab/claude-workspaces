@@ -36,6 +36,7 @@ struct ToolRunner {
                 if sessions.isEmpty { lines.append("    (no sessions)") }
                 for s in sessions {
                     var line = "    - \(s.label) | \(s.status.rawValue) | id \(s.shortId)"
+                    if let title = s.title { line += " | \(title.full)" }
                     if s.isTerminal { line += " | terminal (shell, not Claude)" }
                     if let activity = s.activity, s.status == .working { line += " | \(activity)" }
                     if let message = s.message, s.status == .waiting { line += " | \(message)" }
@@ -54,7 +55,8 @@ struct ToolRunner {
     private func setStatus(_ text: String?) -> ToolResult {
         guard let caller else { return noCaller }
         let phrase = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        caller.activity = phrase.isEmpty ? nil : String(phrase.prefix(80))
+        caller.setActivity(phrase.isEmpty ? nil : String(phrase.prefix(80)))
+        caller.statusPhraseAt = phrase.isEmpty ? nil : Date()
         return ToolResult(text: "ok")
     }
 
@@ -88,7 +90,7 @@ struct ToolRunner {
         }
         let scope = model.sessions.filter { caller == nil || $0.workspaceId == caller?.workspaceId }
         var matches = reference.count >= 4 ? scope.filter { $0.id.uuidString.lowercased().hasPrefix(reference) } : []
-        if matches.isEmpty { matches = scope.filter { $0.label.lowercased() == reference } }
+        if matches.isEmpty { matches = scope.filter { $0.label.lowercased() == reference || $0.title?.tab.lowercased() == reference } }
         switch matches.count {
         case 1: return .found(matches[0])
         case 0: return .failure(ToolResult(text: "Sessão não encontrada neste workspace.", isError: true))

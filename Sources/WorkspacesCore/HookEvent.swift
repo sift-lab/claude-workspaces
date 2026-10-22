@@ -19,6 +19,8 @@ public struct HookUpdate: Equatable, Sendable {
     public var startsConversation: Bool
     /// UserPromptSubmit only: the text that was sent.
     public var prompt: String?
+    /// PostToolUse only: what the tool did, in a few words ("Rodando os testes", "Editando App.swift").
+    public var activity: String?
 
     public init(event: String = "", status: SessionStatus?, message: String? = nil, claudeSessionId: String? = nil,
                 cwd: String? = nil, transcriptPath: String? = nil, source: String? = nil,
@@ -57,6 +59,7 @@ public enum HookEvent {
         case "PostToolUse":
             // After a permission prompt is answered the tool runs, so this also clears "waiting".
             update.status = .working
+            update.activity = ToolActivity.phrase(tool: payload["tool_name"]?.stringValue, input: payload["tool_input"])
         case "Notification":
             // Claude also notifies when a finished session has sat at its prompt for a while
             // ("idle_prompt"). That is not waiting for the person, so the state stays as it is.
