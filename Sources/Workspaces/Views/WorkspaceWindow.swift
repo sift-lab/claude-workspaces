@@ -223,29 +223,45 @@ private struct Sidebar: View {
             selection = session.id
             mode = .single
         } label: {
-            HStack(spacing: 8) {
+            // The name gets the whole first line; where it works, the context and the sleep go below.
+            let branch = session.isTerminal || model.tabName(session) == session.label ? nil : session.label
+            HStack(alignment: .top, spacing: 8) {
                 StatusGlyph(status: session.status, attention: session.attention, terminal: session.isTerminal)
-                Text(model.displayLabel(session))
-                    .font(.system(size: 13, weight: session.needsYou ? .semibold : (selected ? .medium : .regular)))
-                    .foregroundStyle(session.needsYou || selected ? Theme.primary : (session.status == .working ? Theme.support : Theme.secondary))
-                    .lineLimit(1)
-                    // A branch keeps its end ("feat/q…-email"); a title reads from the start.
-                    .truncationMode(session.title == nil ? .middle : .tail)
-                Spacer(minLength: 4)
-                TokenMark(session: session)
-                if session.sleep != .awake {
-                    Image(systemName: "moon")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(Theme.faint)
-                        .accessibilityLabel(session.sleep == .frozen ? "Congelada" : "Hibernando")
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    // The title gets the whole width and two lines; everything else goes on the line below.
+                    Text(model.displayLabel(session))
+                        .font(.system(size: 13, weight: session.needsYou ? .semibold : (selected ? .medium : .regular)))
+                        .foregroundStyle(session.needsYou || selected ? Theme.primary : (session.status == .working ? Theme.support : Theme.secondary))
+                        // A branch keeps its end ("feat/q…-email"); a title reads from the start.
+                        .lineLimit(session.title == nil ? 1 : 2)
+                        .truncationMode(session.title == nil ? .middle : .tail)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 6) {
+                        Text(branch ?? "")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        TokenMark(session: session, compact: true)
+                        if session.sleep != .awake {
+                            Image(systemName: "moon")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(Theme.faint)
+                                .accessibilityLabel(session.sleep == .frozen ? "Congelada" : "Hibernando")
+                        }
+                        Text(RelativeTime.short(since: session.lastChange, now: model.now))
+                            .font(.system(size: 11))
+                            .foregroundStyle(session.needsYou ? Theme.secondary : Theme.tertiary)
+                            .fixedSize()
+                    }
                 }
-                Text(RelativeTime.short(since: session.lastChange, now: model.now))
-                    .font(.system(size: 11))
-                    .foregroundStyle(session.needsYou ? Theme.secondary : Theme.tertiary)
             }
             .padding(.leading, 28)
             .padding(.trailing, 10)
-            .frame(height: 28)
+            .padding(.vertical, 6)
+            .frame(minHeight: 28)
         }
         .buttonStyle(RowButtonStyle(selected: selected))
         .help(model.tooltip(session))
