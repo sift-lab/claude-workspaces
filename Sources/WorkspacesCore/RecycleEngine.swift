@@ -360,8 +360,8 @@ public final class RecycleEngine {
         guard let open = state.open[id.uuidString] else { return }
         switch open.phase {
         case .waitingForStop, .waitingForStart:
-            let trigger = open.phase == .waitingForStop ? "Stop" : "SessionStart"
-            if update.event == trigger {
+            let triggered = open.phase == .waitingForStop ? update.endsTurn : update.event == "SessionStart"
+            if triggered {
                 host.after(Self.settle) { [weak self] in self?.runScheduled(id) }
             } else if update.status == .ended {
                 stop(id, "a sessão terminou antes da reciclagem; nada foi limpo")
@@ -384,7 +384,7 @@ public final class RecycleEngine {
                     host.show(id, .waitingTurn)
                     arm(id, after: Self.retryDelay) { [weak self] in self?.deliverResume(id) }
                 }
-            } else if update.event == "Stop", open.phase == .waitingTurn {
+            } else if update.endsTurn, open.phase == .waitingTurn {
                 host.after(Self.settle) { [weak self] in self?.deliverResume(id) }
             } else if update.status == .ended {
                 stop(id, "a sessão terminou antes de receber a mensagem de retomada; a Passagem está em \(open.record?.handoffFile ?? "?")")

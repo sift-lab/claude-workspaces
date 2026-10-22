@@ -10,7 +10,9 @@ private enum SettingsPane: Hashable {
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
-    @State private var pane: SettingsPane = .general
+    /// The screenshot mode can open on the Claude Code pane (`WORKSPACES_SCREENSHOTS_SETTINGS=claude`).
+    @State private var pane: SettingsPane =
+        ProcessInfo.processInfo.environment["WORKSPACES_SCREENSHOTS_SETTINGS"] == "claude" ? .claude : .general
 
     var body: some View {
         HStack(spacing: 0) {
@@ -322,6 +324,45 @@ private struct ProjectRow: View {
     }
 }
 
+/// One Claude Code login: its name and the config folder that keeps it (empty is ~/.claude).
+private struct AccountRow: View {
+    let account: ClaudeAccount
+    let active: Bool
+    let last: Bool
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Circle().fill(active ? Theme.primary : Theme.faint).frame(width: 6, height: 6)
+                    .accessibilityLabel(active ? "Em uso" : "")
+                CommitField(placeholder: "conta1", value: account.name) { model.renameAccount(account.id, to: $0) }
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .frame(width: 110)
+                CommitField(placeholder: "~/.claude", value: account.configDir) { model.setAccountFolder(account.id, to: $0) }
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .help("Pasta do Claude Code desta conta (CLAUDE_CONFIG_DIR)")
+                Spacer(minLength: 0)
+                if active {
+                    Text("Em uso").font(.system(size: 12)).foregroundStyle(Theme.support).frame(width: 64)
+                } else {
+                    Button("Usar") { model.accounts.switchTo(account.name) }.frame(width: 64)
+                }
+                Button { model.removeAccount(account.id) } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(active ? Theme.faint : Theme.tertiary)
+                    .disabled(active)
+                    .accessibilityLabel("Remover \(account.name)")
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 44)
+            if !last { Rectangle().fill(Theme.divider).frame(height: 1) }
+        }
+    }
+}
+
 private struct ClaudePane: View {
     @Environment(AppModel.self) private var model
 
@@ -356,6 +397,20 @@ private struct ClaudePane: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                         .frame(width: 220)
+                }
+            }
+            SettingsGroup(title: "Contas", accessory: AnyView(
+                Button("Adicionar") { model.addAccount() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.support)
+            )) {
+                if model.config.accounts.isEmpty {
+                    FormRow(title: "Login padrão do Claude Code", last: true) { EmptyView() }
+                }
+                ForEach(Array(model.config.accounts.enumerated()), id: \.element.id) { index, account in
+                    AccountRow(account: account, active: account.name == model.activeAccount.name,
+                               last: index == model.config.accounts.count - 1)
                 }
             }
             SettingsGroup(title: "O que uma sessão pode fazer") {
