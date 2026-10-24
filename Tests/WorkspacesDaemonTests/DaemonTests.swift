@@ -20,6 +20,9 @@ final class FakeTerminal: SessionTerminal {
     var inputs: [String: String] = [:]
     private var atStart: Set<String> = []
     var enterKeepsInput = false
+    /// What Claude Code draws after the input, not faint: a suggested command's description. It
+    /// goes when the input is sent or edited at its start.
+    var hints: [String: String] = [:]
     var started: [(name: String, folder: String, environment: [String: String], argv: [String])] = []
 
     func start(name: String, folder: String, environment: [String: String], argv: [String]) throws {
@@ -41,6 +44,7 @@ final class FakeTerminal: SessionTerminal {
     func pressEnter(_ name: String) {
         events.append(.enter(name))
         if !enterKeepsInput, inputs[name] != nil { inputs[name] = "" }
+        if !enterKeepsInput { hints[name] = nil }
     }
     func press(_ name: String, key: String) {
         events.append(.key(name, key))
@@ -48,12 +52,13 @@ final class FakeTerminal: SessionTerminal {
         if key == "DC", atStart.contains(name), var input = inputs[name], !input.isEmpty {
             input.removeFirst()
             inputs[name] = input
+            hints[name] = nil
         }
     }
     func capture(_ name: String) -> String {
         if let screen = screens[name] { return screen }
         guard let input = inputs[name] else { return "" }
-        return "\u{1B}[38;5;244m────────\n\u{1B}[39m❯\u{A0}\(input)\n\u{1B}[38;5;244m────────\n"
+        return "\u{1B}[38;5;244m────────\n\u{1B}[39m❯\u{A0}\(input)\(hints[name] ?? "")\n\u{1B}[38;5;244m────────\n"
     }
     func typed(_ name: String) -> String? { inputs[name] }
     func pid(_ name: String) -> Int32? { nil }
@@ -521,6 +526,54 @@ final class Harness {
         h.scheduler.advance(by: 0.4)
         #expect(!h.terminal.events.contains(.enter(s.terminalName)))
         #expect(h.terminal.typed(s.terminalName) == " e mais isto")
+        #expect(h.records.map(\.kind) == [.deferred])
+    }
+
+    /// The screen of 18/10: Claude Code draws /clear's description on the input line, not faint.
+    private static let clearHint = String(repeating: " ", count: 28)
+        + "Start a new session with empty context; previous session stays on disk (resumable with /resume)"
+
+    /// D: the description after the typed /clear is not a draft: Enter goes.
+    @Test func theClearsHintDoesNotHoldTheRecycle() throws {
+        let h = try Harness()
+        let s = try h.openedSession(conversation: "old")
+        try h.writePassagem()
+        h.screen(s, input: "")
+        #expect(h.call("recycle_session", ["session": .string(s.shortId)]).ok)
+        h.terminal.hints[s.terminalName] = Self.clearHint
+        h.scheduler.advance(by: 0.4)
+        #expect(h.terminal.events.last == .enter(s.terminalName))
+        #expect(h.records.map(\.kind) == [.recycle])
+    }
+
+    /// D: a draft before the /clear, with the description after it, still holds it.
+    @Test func aDraftBeforeTheClearAndItsHintDefers() throws {
+        let h = try Harness()
+        let s = try h.openedSession(conversation: "old")
+        try h.writePassagem()
+        h.screen(s, input: "")
+        #expect(h.call("recycle_session", ["session": .string(s.shortId)]).ok)
+        h.terminal.inputs[s.terminalName] = "rascunho /clear"
+        h.terminal.hints[s.terminalName] = Self.clearHint
+        h.scheduler.advance(by: 0.4)
+        #expect(!h.terminal.events.contains(.enter(s.terminalName)))
+        #expect(h.terminal.typed(s.terminalName) == "rascunho /clear")
+        #expect(h.records.map(\.kind) == [.deferred])
+        #expect(h.records.first?.reason?.contains("não mostrava só o /clear") == true)
+    }
+
+    /// D: a draft one blank after the /clear is typed text, not the description.
+    @Test func aDraftAfterTheClearAndItsHintDefers() throws {
+        let h = try Harness()
+        let s = try h.openedSession(conversation: "old")
+        try h.writePassagem()
+        h.screen(s, input: "")
+        #expect(h.call("recycle_session", ["session": .string(s.shortId)]).ok)
+        h.terminal.inputs[s.terminalName, default: ""] += " rascunho"
+        h.terminal.hints[s.terminalName] = Self.clearHint
+        h.scheduler.advance(by: 0.4)
+        #expect(!h.terminal.events.contains(.enter(s.terminalName)))
+        #expect(h.terminal.typed(s.terminalName) == " rascunho")
         #expect(h.records.map(\.kind) == [.deferred])
     }
 
