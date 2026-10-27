@@ -19,6 +19,13 @@ public struct HookUpdate: Equatable, Sendable {
     public var startsConversation: Bool
     /// UserPromptSubmit only: the text that was sent.
     public var prompt: String?
+    /// PostToolUse only: what the tool did, in a few words ("Rodando os testes", "Editando App.swift").
+    public var activity: String?
+    /// StopFailure only: the API error the turn ended on ("rate_limit", "overloaded"...).
+    public var failure: String?
+
+    /// The turn is over: Stop, or StopFailure when it ended on an API error.
+    public var endsTurn: Bool { event == "Stop" || event == "StopFailure" }
 
     public init(event: String = "", status: SessionStatus?, message: String? = nil, claudeSessionId: String? = nil,
                 cwd: String? = nil, transcriptPath: String? = nil, source: String? = nil,
@@ -38,7 +45,8 @@ public struct HookUpdate: Equatable, Sendable {
 
 public enum HookEvent {
     /// The events the app subscribes to in the settings it passes to `claude --settings`.
-    public static let subscribed = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SessionEnd"]
+    public static let subscribed = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "StopFailure",
+                                    "SessionEnd"]
 
     public static func update(from payload: JSONValue) -> HookUpdate? {
         guard let event = payload["hook_event_name"]?.stringValue else { return nil }
@@ -57,6 +65,7 @@ public enum HookEvent {
         case "PostToolUse":
             // After a permission prompt is answered the tool runs, so this also clears "waiting".
             update.status = .working
+            update.activity = ToolActivity.phrase(tool: payload["tool_name"]?.stringValue, input: payload["tool_input"])
         case "Notification":
             // Claude also notifies when a finished session has sat at its prompt for a while
             // ("idle_prompt"). That is not waiting for the person, so the state stays as it is.
@@ -70,6 +79,10 @@ public enum HookEvent {
             }
         case "Stop":
             update.status = .done
+        case "StopFailure":
+            // The turn ended on an API error instead of Stop: a spent limit ends it as "rate_limit".
+            update.status = .done
+            update.failure = payload["error"]?.stringValue
         case "SessionEnd":
             // /clear and /resume end one conversation and start another in the same process.
             let reason = payload["reason"]?.stringValue

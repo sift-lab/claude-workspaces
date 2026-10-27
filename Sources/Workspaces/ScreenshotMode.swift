@@ -16,6 +16,12 @@ enum ScreenshotMode {
     static func start(model: AppModel) {
         guard let directory else { return }
         acceptTrustPrompts(model: model, until: Date().addingTimeInterval(60))
+        // `WORKSPACES_SCREENSHOTS_ACCOUNT=<name>` moves the sessions to that account, `..._AT` seconds in.
+        let env = ProcessInfo.processInfo.environment
+        if let account = env["WORKSPACES_SCREENSHOTS_ACCOUNT"] {
+            let at = Double(env["WORKSPACES_SCREENSHOTS_ACCOUNT_AT"] ?? "") ?? 30
+            DispatchQueue.main.asyncAfter(deadline: .now() + at) { model.accounts.switchTo(account) }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             run(model: model, directory: directory)
         }

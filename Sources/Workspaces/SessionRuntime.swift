@@ -12,8 +12,24 @@ final class SessionRuntime: Identifiable {
     let isTerminal: Bool
     var label: String
     var status: SessionStatus = .working
-    /// Phrase from `set_status`.
-    var activity: String?
+    /// Phrase from `set_status`, or what the last tool did (PostToolUse).
+    private(set) var activity: String?
+    /// When `activity` was last set.
+    private(set) var activityAt: Date?
+    /// When the session last set its phrase with `set_status`; for a while the tools do not replace it.
+    @ObservationIgnored var statusPhraseAt: Date?
+    /// What the current task is about; nil until its first prompt and again after a /clear.
+    var title: SessionTitle?
+    /// Tab names of the tasks before a /clear, newest first.
+    var titleHistory: [String] = []
+    /// The prompt being named right now; shown in place of the title meanwhile.
+    var titlePending: String?
+    /// The first prompt of the conversation and the latest ones, for naming it again.
+    @ObservationIgnored var prompts: [String] = []
+    /// Increases with every naming, so an answer for a task that was cleared is dropped.
+    @ObservationIgnored var titleRequest = 0
+    /// The branch at the last look, to tell a name that follows the branch from one given by hand.
+    @ObservationIgnored var branchSeen: String?
     /// Text from the last Notification hook (what Claude is waiting for).
     var message: String?
     /// Set by `notify` or an incoming `send_message`; cleared when the person opens the session.
@@ -23,6 +39,8 @@ final class SessionRuntime: Identifiable {
     @ObservationIgnored var lastSeen = Date()
     /// Increases on every launch; hooks from an older process carry an older number.
     @ObservationIgnored var launch = 0
+    /// The account the running Claude was started in; nil before the first launch.
+    @ObservationIgnored var account: String?
     /// Which conversation Claude is in, and which one `claude --resume` opens; fed by every hook.
     var conversation = ConversationTracker(saved: nil)
     var claudeSessionId: String? { conversation.current }
@@ -54,6 +72,17 @@ final class SessionRuntime: Identifiable {
     }
 
     var needsYou: Bool { status == .waiting || attention }
+
+    func setActivity(_ phrase: String?) {
+        activity = phrase
+        activityAt = phrase == nil ? nil : Date()
+    }
+
+    /// Remembers a prompt: the first one of the conversation stays, then the latest three.
+    func remember(prompt: String) {
+        prompts.append(prompt)
+        if prompts.count > 4 { prompts.remove(at: 1) }
+    }
 
     /// Shown under the name: why it waits, or what it is doing.
     var detail: String {

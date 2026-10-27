@@ -34,6 +34,8 @@ final class TokenMonitor {
     private(set) var weekFull = LimitMath.defaultWeekWeight
     /// The Consumo window shows this session in full.
     var focused: UUID?
+    /// The account on the meter: the one sessions start in.
+    private(set) var account = AppModel.environmentAccount
 
     @ObservationIgnored weak var model: AppModel?
     @ObservationIgnored private let queue = DispatchQueue(label: "workspaces.tokens", qos: .utility)
@@ -70,12 +72,78 @@ final class TokenMonitor {
         timer?.tolerance = 3
     }
 
+    // MARK: Accounts
+
+    /// The meter follows the account the sessions start in; the readings of the others are kept apart.
+    func useAccount(_ name: String) {
+        guard name != account else { return }
+        flushSave()
+        others[account] = LimitReadings(fiveHour: readings5, sevenDay: readings7)
+        account = name
+        store = LimitReadingStore(account: name)
+        loadReadings()
+        others[name] = nil
+        fiveHour = readings5.last
+        sevenDay = readings7.last
+        refresh()
+    }
+
+    /// A renamed account keeps its readings: the file moves with the name.
+    func renameAccount(_ old: String, to new: String) {
+        flushSave()
+        let from = LimitReadingStore(account: old).url, to = LimitReadingStore(account: new)
+        queue.sync {
+            try? FileManager.default.removeItem(at: to.url)
+            try? FileManager.default.moveItem(at: from, to: to.url)
+        }
+        if account == old {
+            account = new
+            store = to
+        }
+        if let saved = others.removeValue(forKey: old) { others[new] = saved }
+    }
+
+    /// Writes the meter's readings now, on the queue after any write already there, so no write of
+    /// the account being left lands later.
+    private func flushSave() {
+        guard let pending = pendingSave else { return }
+        pending.cancel()
+        pendingSave = nil
+        let saved = LimitReadings(fiveHour: readings5, sevenDay: readings7), store = self.store
+        queue.async { try? store.save(saved) }
+    }
+
+    /// The latest readings of any account, the one on the meter included.
+    func readings(of name: String) -> LimitReadings {
+        if name == account { return LimitReadings(fiveHour: readings5, sevenDay: readings7) }
+        if let known = others[name] { return known }
+        let saved = LimitReadingStore(account: name).load()
+        others[name] = saved
+        return saved
+    }
+
+    /// A session still running in another account (until it is moved): its meter is that account's.
+    private func receiveElsewhere(_ reading: StatusLineReading, account name: String) {
+        var saved = readings(of: name)
+        var changed = false
+        if let r = reading.fiveHour { changed = LimitReadings.record(r, in: &saved.fiveHour) || changed }
+        if let r = reading.sevenDay { changed = LimitReadings.record(r, in: &saved.sevenDay) || changed }
+        guard changed else { return }
+        others[name] = saved
+        let store = LimitReadingStore(account: name)
+        queue.async { try? store.save(saved) }
+    }
+
     // MARK: Status line
 
     func receive(_ reading: StatusLineReading, from runtime: SessionRuntime) {
         let now = Date()
         if let id = reading.sessionId ?? runtime.claudeSessionId, let tokens = reading.contextTokens, tokens > 0 {
             exact[id] = ExactContext(tokens: tokens, size: reading.contextSize, at: now)
+        }
+        if let name = runtime.account, name != account {
+            receiveElsewhere(reading, account: name)
+            return
         }
         var changed = false
         if let r = reading.fiveHour {
@@ -322,13 +390,13 @@ final class TokenMonitor {
 
     // MARK: Files
 
-    /// Every session of the app runs in one account: the one in `WORKSPACES_CONTA`, or conta1.
-    /// Until its own file exists, the single file of earlier versions is read.
-    private let store = LimitReadingStore(account: LimitReadingStore.accountName(
-        ProcessInfo.processInfo.environment[LimitReadingStore.accountEnvKey]))
+    /// Until the app knows the active account: the one in `WORKSPACES_CONTA`, or conta1.
+    /// Until the default account's own file exists, the single file of earlier versions is read.
+    @ObservationIgnored private var store = LimitReadingStore(account: AppModel.environmentAccount)
+    @ObservationIgnored private var others: [String: LimitReadings] = [:]
 
     private func loadReadings() {
-        let saved = store.load(legacy: true)
+        let saved = store.load(legacy: account == LimitReadingStore.defaultAccount)
         readings5 = saved.fiveHour
         readings7 = saved.sevenDay
     }

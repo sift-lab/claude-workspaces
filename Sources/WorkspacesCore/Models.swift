@@ -17,15 +17,21 @@ public struct SavedSession: Codable, Hashable, Identifiable, Sendable {
     public var cwd: String?
     /// A plain shell instead of Claude, reopened in `cwd`.
     public var terminal: Bool
+    /// What the current task is about; nil until its first prompt, and again after a /clear.
+    public var title: SessionTitle?
+    /// Tab names of the tasks this session had before a /clear, newest first.
+    public var titleHistory: [String]
 
     public init(id: UUID, label: String, claudeSessionId: String? = nil, worktree: String? = nil, cwd: String? = nil,
-                terminal: Bool = false) {
+                terminal: Bool = false, title: SessionTitle? = nil, titleHistory: [String] = []) {
         self.id = id
         self.label = label
         self.claudeSessionId = claudeSessionId
         self.worktree = worktree
         self.cwd = cwd
         self.terminal = terminal
+        self.title = title
+        self.titleHistory = titleHistory
     }
 
     public init(from decoder: Decoder) throws {
@@ -36,6 +42,8 @@ public struct SavedSession: Codable, Hashable, Identifiable, Sendable {
         worktree = try c.decodeIfPresent(String.self, forKey: .worktree)
         cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
         terminal = try c.decodeIfPresent(Bool.self, forKey: .terminal) ?? false
+        title = try c.decodeIfPresent(SessionTitle.self, forKey: .title)
+        titleHistory = try c.decodeIfPresent([String].self, forKey: .titleHistory) ?? []
     }
 }
 
@@ -102,12 +110,21 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var freezeAfterMinutes: Int
     /// Minutes before it is hibernated (process ended, resumed on open); 0 turns it off.
     public var hibernateAfterMinutes: Int
+    /// Names each task on its first prompt with a small model (`claude -p`); `/titulo` works either way.
+    public var generateTitles: Bool
+    /// The model that names tasks, as `claude --model` takes it.
+    public var titleModel: String
+    /// The Claude Code logins the sessions can run in. Empty: Claude Code's default login only.
+    public var accounts: [ClaudeAccount]
+    /// The account sessions start in, by name; the first one when nil or gone.
+    public var activeAccount: String?
 
     public static let defaultDisabledTools = ["close_session"]
 
     public init(workspaces: [Workspace] = [], notifyWhenWaiting: Bool = true, reopenSessions: Bool = true,
                 disabledTools: [String] = AppConfig.defaultDisabledTools, claudeCommand: String = "claude",
-                freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30) {
+                freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30, generateTitles: Bool = true,
+                titleModel: String = "haiku", accounts: [ClaudeAccount] = [], activeAccount: String? = nil) {
         self.workspaces = workspaces
         self.notifyWhenWaiting = notifyWhenWaiting
         self.reopenSessions = reopenSessions
@@ -115,6 +132,16 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.claudeCommand = claudeCommand
         self.freezeAfterMinutes = freezeAfterMinutes
         self.hibernateAfterMinutes = hibernateAfterMinutes
+        self.generateTitles = generateTitles
+        self.titleModel = titleModel
+        self.accounts = accounts
+        self.activeAccount = activeAccount
+    }
+
+    /// The account sessions start in. With no accounts set, Claude Code's default login, named `fallback`.
+    public func currentAccount(fallback: String) -> ClaudeAccount {
+        accounts.first { $0.name == activeAccount } ?? accounts.first
+            ?? ClaudeAccount(id: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!, name: fallback)
     }
 
     public init(from decoder: Decoder) throws {
@@ -126,6 +153,10 @@ public struct AppConfig: Codable, Equatable, Sendable {
         claudeCommand = try c.decodeIfPresent(String.self, forKey: .claudeCommand) ?? "claude"
         freezeAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .freezeAfterMinutes) ?? 2
         hibernateAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateAfterMinutes) ?? 30
+        generateTitles = try c.decodeIfPresent(Bool.self, forKey: .generateTitles) ?? true
+        titleModel = try c.decodeIfPresent(String.self, forKey: .titleModel) ?? "haiku"
+        accounts = try c.decodeIfPresent([ClaudeAccount].self, forKey: .accounts) ?? []
+        activeAccount = try c.decodeIfPresent(String.self, forKey: .activeAccount)
     }
 }
 

@@ -9,7 +9,12 @@ final class AppModel {
     static let shared = AppModel()
 
     var config: AppConfig {
-        didSet { if config != oldValue { saveConfig() } }
+        didSet {
+            guard config != oldValue else { return }
+            saveConfig()
+            // The meter follows the account sessions start in, however it changed.
+            tokens.useAccount(activeAccount.name)
+        }
     }
     private(set) var sessions: [SessionRuntime] = []
     /// Refreshed every 30 s: relative times only show minutes, so nothing redraws every second.
@@ -45,6 +50,12 @@ final class AppModel {
     private(set) var appUsage: Usage = .zero
     /// Tokens the sessions spend and the account's limit.
     let tokens = TokenMonitor()
+    /// The tab and the title of each task, `/titulo` and Renomear. Set at the end of init.
+    @ObservationIgnored private(set) var titler: SessionTitler!
+    /// Moves the sessions to another Claude Code account. Set at the end of init.
+    @ObservationIgnored private(set) var accounts: AccountSwitcher!
+    /// The plugin with `/workspaces:titulo` was written and goes to every session.
+    @ObservationIgnored private var pluginReady = false
     /// "Procurar atualizações…" and the silent checks. Started once the app finished launching.
     @ObservationIgnored private(set) var updater: Updater!
     /// Workspaces whose windows were open before an update restarted the app.
@@ -91,8 +102,11 @@ final class AppModel {
         }
         slowTimer?.tolerance = 5
         Notifier.shared.setUp { [weak self] sessionId in self?.focus(sessionId: sessionId) }
+        titler = SessionTitler(model: self)
+        accounts = AccountSwitcher(model: self)
         updater = Updater(model: self)
         pendingReopen = Self.takeReopenList()
+        tokens.useAccount(activeAccount.name)
         tokens.start(model: self)
         Orphans.reap(settingsPath: AppPaths.claudeSettingsFile.path)
         ScreenshotMode.start(model: self)
@@ -124,6 +138,65 @@ final class AppModel {
         return nil
     }
 
+    /// The account named by the app's own `WORKSPACES_CONTA`, or conta1: Claude Code's default login
+    /// when no accounts are set.
+    nonisolated static let environmentAccount = LimitReadingStore.accountName(
+        ProcessInfo.processInfo.environment[LimitReadingStore.accountEnvKey])
+
+    /// The account sessions start in.
+    var activeAccount: ClaudeAccount { config.currentAccount(fallback: Self.environmentAccount) }
+
+    /// A new account in the settings: "conta1" in Claude Code's default folder, then "conta2"...
+    /// The first one is the login in use, under the name it already had, so nothing moves.
+    func addAccount() {
+        guard !config.accounts.isEmpty else {
+            var first = config
+            first.accounts = [ClaudeAccount(name: Self.environmentAccount)]
+            first.activeAccount = Self.environmentAccount
+            config = first
+            return
+        }
+        var n = config.accounts.count + 1
+        while config.accounts.contains(where: { $0.name == "conta\(n)" }) { n += 1 }
+        config.accounts.append(ClaudeAccount(name: "conta\(n)"))
+    }
+
+    /// A name must be valid for a file name and unique; anything else is ignored.
+    func renameAccount(_ id: UUID, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespaces)
+        guard LimitReadingStore.isValidAccount(name), !config.accounts.contains(where: { $0.name == name }),
+              let i = config.accounts.firstIndex(where: { $0.id == id }) else { return }
+        let old = config.accounts[i].name
+        // The readings and the sessions go with the name, and the config changes in one write.
+        tokens.renameAccount(old, to: name)
+        accounts.renamed(old, to: name)
+        for runtime in sessions where runtime.account == old { runtime.account = name }
+        var renamed = config
+        if activeAccount.name == old { renamed.activeAccount = name }
+        renamed.accounts[i].name = name
+        config = renamed
+    }
+
+    /// `--resume` finds a conversation only in the folder of the account that runs it, so every
+    /// account must keep its conversations in the same place.
+    func setAccountFolder(_ id: UUID, to folder: String) {
+        guard let i = config.accounts.firstIndex(where: { $0.id == id }) else { return }
+        var account = config.accounts[i]
+        account.configDir = folder.trimmingCharacters(in: .whitespaces)
+        if let other = config.accounts.first(where: { $0.id != id }), other.conversationsPath != account.conversationsPath {
+            accounts.tell("A pasta não foi usada",
+                          "Ela guarda as conversas em \(account.conversationsPath) e a \(other.name), em \(other.conversationsPath). Aponte a pasta projects dela para \(other.conversationsPath) e tente de novo.")
+            return
+        }
+        config.accounts[i] = account
+    }
+
+    /// The account in use stays: its sessions would have nowhere to go.
+    func removeAccount(_ id: UUID) {
+        guard let account = config.accounts.first(where: { $0.id == id }), account.name != activeAccount.name else { return }
+        config.accounts.removeAll { $0.id == id }
+    }
+
     func session(_ id: UUID?) -> SessionRuntime? {
         guard let id else { return nil }
         return sessions.first { $0.id == id }
@@ -131,11 +204,27 @@ final class AppModel {
 
     func sessions(inProject id: UUID) -> [SessionRuntime] { sessions.filter { $0.projectId == id } }
 
-    /// The label, numbered when several sessions of a project share it ("main (2)").
+    /// The name in the sidebar, numbered when several sessions of a project share it ("main (2)").
     func displayLabel(_ session: SessionRuntime) -> String {
-        let same = sessions(inProject: session.projectId).filter { $0.label == session.label }
-        guard same.count > 1, let index = same.firstIndex(where: { $0.id == session.id }), index > 0 else { return session.label }
-        return "\(session.label) (\(index + 1))"
+        let name = tabName(session)
+        let same = sessions(inProject: session.projectId).filter { tabName($0) == name }
+        guard same.count > 1, let index = same.firstIndex(where: { $0.id == session.id }), index > 0 else { return name }
+        return "\(name) (\(index + 1))"
+    }
+
+    /// The task's tab name, the prompt being named meanwhile, or the branch when the task has no title.
+    func tabName(_ session: SessionRuntime) -> String {
+        if let title = session.title { return title.tab }
+        if session.isTerminal { return session.label }
+        if let pending = session.titlePending, !pending.isEmpty { return SessionTitle.clean(pending, limit: SessionTitle.tabLimit) }
+        return session.hasConversation || session.status == .ended ? session.label : "Nova sessão"
+    }
+
+    /// The sidebar row's tooltip: the whole title, the branch, what it is doing and the tasks before.
+    func tooltip(_ session: SessionRuntime) -> String {
+        var lines = [session.title?.full, session.label, session.detail].compactMap { $0 }
+        if !session.titleHistory.isEmpty { lines.append("Antes: " + session.titleHistory.joined(separator: ", ")) }
+        return lines.joined(separator: "\n")
     }
     func sessions(inWorkspace id: UUID) -> [SessionRuntime] { sessions.filter { $0.workspaceId == id } }
     var sessionsNeedingYou: [SessionRuntime] { sessions.filter(\.needsYou).sorted { $0.lastChange > $1.lastChange } }
@@ -254,18 +343,36 @@ final class AppModel {
 
     // MARK: Sessions
 
+    /// `mode` overrides the project's setting (where new sessions open) for this one.
     @discardableResult
-    func newSession(projectId: UUID, worktree: String? = nil, prompt: String? = nil) -> SessionRuntime? {
+    func newSession(projectId: UUID, worktree: String? = nil, prompt: String? = nil, mode: NewSessionMode? = nil) -> SessionRuntime? {
         guard let (workspace, project) = project(projectId) else { return nil }
         let id = UUID()
         var worktreeName = worktree
-        if worktreeName == nil, project.newSessionMode == .worktree {
+        if worktreeName == nil, (mode ?? project.newSessionMode) == .worktree {
             worktreeName = "ws-" + String(id.uuidString.lowercased().prefix(6))
         }
         let label = worktreeName ?? Git.branch(at: project.path) ?? project.name
         let saved = SavedSession(id: id, label: label, worktree: worktreeName)
         updateProject(projectId) { $0.savedSessions.append(saved) }
         return launch(saved: saved, project: project, workspaceId: workspace.id, prompt: prompt)
+    }
+
+    /// ⌘T: a new Claude session in the worktree `other` works in; in the project's own checkout it
+    /// opens as the project is set (its folder or a new worktree).
+    @discardableResult
+    func newSession(besides other: SessionRuntime) -> SessionRuntime? {
+        guard let (workspace, project) = project(other.projectId) else { return nil }
+        // Before its first hook a worktree session has no cwd yet; its worktree is where Claude Code makes it.
+        let seen = other.cwd ?? other.worktree.map { URL(fileURLWithPath: project.path).appendingPathComponent(".claude/worktrees/\($0)").path }
+        guard let folder = seen.flatMap({ Git.otherCheckout(of: project.path, seenFrom: $0) }) else {
+            return newSession(projectId: project.id)
+        }
+        // A worktree name makes the launch reuse the folder in `cwd` instead of creating a worktree.
+        let name = other.worktree ?? URL(fileURLWithPath: folder).lastPathComponent
+        let saved = SavedSession(id: UUID(), label: Git.branch(at: folder) ?? name, worktree: name, cwd: folder)
+        updateProject(project.id) { $0.savedSessions.append(saved) }
+        return launch(saved: saved, project: project, workspaceId: workspace.id)
     }
 
     /// A plain login shell in the project, or in `folder` (a session's worktree), listed with the sessions.
@@ -285,6 +392,8 @@ final class AppModel {
                                      label: saved.label, worktree: saved.worktree, isTerminal: saved.terminal)
         runtime.conversation = ConversationTracker(saved: saved.claudeSessionId)
         runtime.cwd = saved.cwd
+        runtime.title = saved.title
+        runtime.titleHistory = saved.titleHistory
         sessions.append(runtime)
         start(runtime, project: project, prompt: prompt)
         return runtime
@@ -323,7 +432,8 @@ final class AppModel {
             resumeId: resumeId,
             worktree: worktree,
             prompt: prompt,
-            extraArguments: project.claudeArguments
+            extraArguments: project.claudeArguments,
+            pluginDir: pluginReady ? AppPaths.pluginDirectory.path : nil
         )
         runtime.status = resuming ? .idle : .working
         runtime.sleep = .awake
@@ -339,13 +449,14 @@ final class AppModel {
             runtime.lastChange = Date()
             self?.updateBadge()
         }
-        var env = loginEnvironment
+        // The account's config folder holds its login; WORKSPACES_CONTA says which account the session's
+        // usage belongs to, for scripts that read it (the obra's despachante).
+        let account = activeAccount
+        var env = account.environment(loginEnvironment)
+        runtime.account = account.name
         env[ClaudeLaunch.sessionEnvKey] = runtime.id.uuidString
         env[ClaudeLaunch.launchEnvKey] = String(runtime.launch)
         if let home = ProcessInfo.processInfo.environment["WORKSPACES_HOME"] { env["WORKSPACES_HOME"] = home }
-        // Which account the session's usage belongs to, for scripts that read it (the obra's despachante).
-        env[LimitReadingStore.accountEnvKey] = LimitReadingStore.accountName(
-            ProcessInfo.processInfo.environment[LimitReadingStore.accountEnvKey])
         // Straight to Claude when the command is plain words; the login shell only when it is not.
         if let argv = ClaudeLaunch.argv(options), let executable = ShellSupport.resolve(argv[0], path: env["PATH"]) {
             runtime.host.start(executable: executable, arguments: Array(argv.dropFirst()), environment: env, directory: folder)
@@ -581,6 +692,27 @@ final class AppModel {
         }
     }
 
+    /// Ends Claude and starts it again on the same conversation, in the account sessions start in now.
+    func relaunch(_ runtime: SessionRuntime, note: String) {
+        guard let (_, project) = project(runtime.projectId), let pid = runtime.host.pid else { return }
+        // Ending it on purpose: the session is not over, and the old process's SessionEnd is dropped.
+        runtime.launch += 1
+        let id = runtime.id, launch = runtime.launch
+        runtime.host.onTerminated = nil
+        runtime.host.terminate()
+        runtime.host.show("\r\n\u{1b}[2m(\(note))\u{1b}[0m\r\n")
+        Task { @MainActor [weak self] in
+            // The old process goes first, so two never write the same conversation.
+            var waited = 0
+            while kill(pid, 0) == 0, waited < 60 {
+                try? await Task.sleep(for: .milliseconds(100))
+                waited += 1
+            }
+            guard let self, let runtime = self.session(id), runtime.launch == launch, !runtime.host.isRunning else { return }
+            self.start(runtime, project: project, prompt: nil)
+        }
+    }
+
     /// Starts an ended session again in the same place, resuming the conversation when known.
     func restart(_ id: UUID) {
         guard let runtime = session(id), !runtime.host.isRunning, let (_, project) = project(runtime.projectId) else { return }
@@ -616,10 +748,12 @@ final class AppModel {
         openWindow?(id: "workspace", value: id)
     }
 
-    private func persist(_ runtime: SessionRuntime) {
+    func persist(_ runtime: SessionRuntime) {
         updateProject(runtime.projectId) { project in
             guard let i = project.savedSessions.firstIndex(where: { $0.id == runtime.id }) else { return }
             project.savedSessions[i].label = runtime.label
+            project.savedSessions[i].title = runtime.title
+            project.savedSessions[i].titleHistory = runtime.titleHistory
             // Nil right after a /clear, until the new conversation has a message: a relaunch then
             // starts clean instead of reopening the conversation that was cleared.
             project.savedSessions[i].claudeSessionId = runtime.conversation.resumable
@@ -634,10 +768,12 @@ final class AppModel {
         switch request.kind {
         case .hook:
             // A hook from a process that was already replaced (a hibernated one exiting late) is dropped.
+            // The reply's text, when not empty, is JSON the hook prints for Claude Code (the answer to `/titulo`).
+            var output = ""
             if let caller, let payload = request.payload, request.launch.flatMap(Int.init) ?? caller.launch == caller.launch {
-                applyHook(payload, to: caller)
+                output = applyHook(payload, to: caller) ?? ""
             }
-            return IPCResponse(ok: true, text: "")
+            return IPCResponse(ok: true, text: output)
         case .tools:
             let enabled = WorkspaceTools.all.map(\.name).filter { !config.disabledTools.contains($0) }
             return IPCResponse(ok: true, text: "", enabledTools: enabled)
@@ -696,9 +832,14 @@ final class AppModel {
     /// A recado typed only once a hibernated session is back.
     func hasPendingPaste(_ id: UUID) -> Bool { pendingPaste[id] != nil }
 
-    private func applyHook(_ payload: JSONValue, to runtime: SessionRuntime) {
-        guard let update = HookEvent.update(from: payload) else { return }
+    /// Applies a hook and returns what the hook should print for Claude Code, if anything.
+    private func applyHook(_ payload: JSONValue, to runtime: SessionRuntime) -> String? {
+        guard let update = HookEvent.update(from: payload) else { return nil }
         if let path = update.transcriptPath { runtime.transcriptPath = path }
+        // `/titulo` is answered here and its prompt blocked: no turn starts, so nothing else changes.
+        if update.event == "UserPromptSubmit", let prompt = update.prompt, TitleCommand.parse(prompt) != nil {
+            return titler.promptSubmitted(prompt, runtime: runtime)
+        }
         if update.status == .idle, let text = pendingPaste.removeValue(forKey: runtime.id) {
             // SessionStart comes a moment before the prompt accepts input.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak runtime] in runtime?.host.paste(text) }
@@ -710,7 +851,14 @@ final class AppModel {
             runtime.lastChange = Date()
             runtime.message = status == .waiting ? update.message : nil
         }
-        if update.clearsActivity { runtime.activity = nil }
+        if update.clearsActivity {
+            runtime.setActivity(nil)
+            runtime.statusPhraseAt = nil
+        }
+        // A phrase the session set on purpose (set_status) holds for two minutes over what the tools say.
+        if let phrase = update.activity, runtime.statusPhraseAt.map({ Date().timeIntervalSince($0) > 120 }) ?? true {
+            runtime.setActivity(phrase)
+        }
         let resumable = runtime.conversation.resumable
         if runtime.conversation.apply(update) {
             ConversationLog.append(session: runtime.id, label: runtime.label, update: update,
@@ -722,18 +870,57 @@ final class AppModel {
             let previous = runtime.cwd ?? project(runtime.projectId)?.project.path
             let wasBranch = previous.flatMap(Git.branch(at:)) == runtime.label || runtime.label == runtime.worktree
             runtime.cwd = cwd
-            if wasBranch, let branch = Git.branch(at: cwd) { runtime.label = branch }
+            let branch = Git.branch(at: cwd)
+            if wasBranch, let branch { runtime.label = branch }
+            runtime.branchSeen = branch
+        } else if update.endsTurn || update.event == "SessionStart" {
+            followBranch(runtime)
         }
         persist(runtime)
         if runtime.status == .waiting, before != .waiting { announceWaiting(runtime) }
         updateBadge()
         if runtime.status != before { updateKeepAwake() }
+
+        switch update.event {
+        case "SessionStart" where update.source == "clear":
+            titler.cleared(runtime)
+        case "UserPromptSubmit":
+            if let prompt = update.prompt { _ = titler.promptSubmitted(prompt, runtime: runtime) }
+        default:
+            break
+        }
+        if update.event == "StopFailure" { accounts.turnFailed(update.failure, runtime: runtime) }
+        // A session left in the old account moves once its turn is over, after the hook has answered.
+        if let account = runtime.account, account != activeAccount.name, runtime.status == .done || runtime.status == .idle {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                self?.accounts.moveSessions()
+            }
+        }
+        return nil
+    }
+
+    /// The name follows the branch while it is the branch's (or the worktree's) name: a checkout
+    /// in the middle of a session shows at the end of the turn. A name given by hand stays.
+    private func followBranch(_ runtime: SessionRuntime) {
+        guard !runtime.isTerminal, let folder = runtime.cwd ?? project(runtime.projectId)?.project.path else { return }
+        // Off the main thread: it runs at the end of every turn of every session.
+        let id = runtime.id
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let branch = Git.branch(at: folder) else { return }
+            DispatchQueue.main.async {
+                guard let self, let runtime = self.session(id), branch != runtime.branchSeen else { return }
+                if runtime.label == runtime.branchSeen || runtime.label == runtime.worktree { runtime.label = branch }
+                runtime.branchSeen = branch
+                self.persist(runtime)
+            }
+        }
     }
 
     func announceWaiting(_ runtime: SessionRuntime, text: String? = nil) {
         guard config.notifyWhenWaiting, !NSApp.isActive || text != nil else { return }
         let projectName = project(runtime.projectId)?.project.name ?? ""
-        Notifier.shared.post(title: "\(runtime.label) está esperando você",
+        Notifier.shared.post(title: "\(displayLabel(runtime)) está esperando você",
                              body: text ?? [projectName, runtime.message].compactMap { $0 }.joined(separator: ": "),
                              sessionId: runtime.id)
     }
@@ -747,6 +934,8 @@ final class AppModel {
         now = Date()
         applySleepPolicy()
         updateKeepAwake()
+        accounts.moveSessions()
+        accounts.check()
     }
 
     private func updateKeepAwake() {
@@ -790,6 +979,7 @@ final class AppModel {
             : ClaudeLaunch.settingsJSON(helperPath: helperPath)
         try settings.encodedLine().write(to: AppPaths.claudeSettingsFile, options: .atomic)
         try ClaudeLaunch.mcpConfigJSON(helperPath: helperPath).encodedLine().write(to: AppPaths.mcpConfigFile, options: .atomic)
+        pluginReady = (try? TitlePlugin.write(to: AppPaths.pluginDirectory)) != nil
     }
 }
 
@@ -834,9 +1024,27 @@ private func samePath(_ a: String, _ b: String?) -> Bool {
 enum Git {
     /// Current branch of the repository at `path`, or nil outside git.
     static func branch(at path: String) -> String? {
+        let out = revParse(["--abbrev-ref", "HEAD"], at: path)
+        return out == "HEAD" ? nil : out
+    }
+
+    /// The project's folder in the checkout `folder` belongs to, when that is another checkout of the
+    /// same repository (a worktree); nil when it is the project's own checkout, another repository or outside git.
+    static func otherCheckout(of project: String, seenFrom folder: String) -> String? {
+        guard let top = revParse(["--show-toplevel"], at: folder),
+              let projectTop = revParse(["--show-toplevel"], at: project), top != projectTop,
+              let common = revParse(["--path-format=absolute", "--git-common-dir"], at: folder),
+              common == revParse(["--path-format=absolute", "--git-common-dir"], at: project) else { return nil }
+        let resolved = URL(fileURLWithPath: project).resolvingSymlinksInPath().path
+        guard resolved == projectTop || resolved.hasPrefix(projectTop + "/") else { return nil }
+        let target = top + resolved.dropFirst(projectTop.count)
+        return FileManager.default.fileExists(atPath: target) ? target : nil
+    }
+
+    private static func revParse(_ arguments: [String], at path: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]
+        process.arguments = ["-C", path, "rev-parse"] + arguments
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -845,6 +1053,6 @@ enum Git {
         guard process.terminationStatus == 0 else { return nil }
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (out?.isEmpty ?? true) || out == "HEAD" ? nil : out
+        return (out?.isEmpty ?? true) ? nil : out
     }
 }

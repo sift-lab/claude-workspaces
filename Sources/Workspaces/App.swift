@@ -114,13 +114,15 @@ private struct WorkspaceCommands: Commands {
     }
 }
 
-/// File menu: ⌘T and ⇧⌘T act on the workspace window in front.
+/// File menu: ⌘T, ⌥⌘T and ⇧⌘T act on the workspace window in front.
 private struct NewSessionItems: View {
     let model: AppModel
 
     var body: some View {
         Button("Nova sessão do Claude") { model.frontWindowActions?.newSession() }
             .keyboardShortcut("t", modifiers: .command)
+        Button("Nova sessão na pasta do projeto") { model.frontWindowActions?.newSessionInProjectFolder() }
+            .keyboardShortcut("t", modifiers: [.command, .option])
         Button("Novo terminal") { model.frontWindowActions?.newTerminal() }
             .keyboardShortcut("t", modifiers: [.command, .shift])
     }
@@ -134,6 +136,15 @@ private struct WorkspaceMenuItems: View {
         ForEach(Array(model.config.workspaces.prefix(9).enumerated()), id: \.element.id) { index, workspace in
             Button(workspace.name) { openWindow(id: "workspace", value: workspace.id) }
                 .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .control)
+        }
+        if model.config.accounts.count > 1 {
+            Divider()
+            Picker("Conta do Claude", selection: Binding(
+                get: { model.activeAccount.name },
+                set: { model.accounts.switchTo($0) }
+            )) {
+                ForEach(model.config.accounts) { account in Text(account.name).tag(account.name) }
+            }
         }
     }
 }
