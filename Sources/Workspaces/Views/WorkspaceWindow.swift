@@ -244,7 +244,7 @@ private struct Sidebar: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer(minLength: 4)
-                        TokenMark(session: session, compact: true)
+                        TokenMark(session: session)
                         if session.sleep != .awake {
                             Image(systemName: "moon")
                                 .font(.system(size: 9, weight: .medium))
@@ -632,7 +632,6 @@ private struct SessionHeading: View {
 
     /// What it is doing, what it waits for, or where it stands.
     private var now: String {
-        if let recycle = session.recycle, recycle.inProgress || recycle.isFailure { return recycle.text }
         if session.status == .waiting { return session.message ?? "Esperando você" }
         if session.attention { return "Pede sua atenção" }
         if let activity = session.activity { return activity }

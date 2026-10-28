@@ -110,8 +110,6 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var freezeAfterMinutes: Int
     /// Minutes before it is hibernated (process ended, resumed on open); 0 turns it off.
     public var hibernateAfterMinutes: Int
-    /// Context (tokens) above which a session "precisa de passagem".
-    public var handoffContextTokens: Int
     /// Names each task on its first prompt with a small model (`claude -p`); `/titulo` works either way.
     public var generateTitles: Bool
     /// The model that names tasks, as `claude --model` takes it.
@@ -125,8 +123,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
 
     public init(workspaces: [Workspace] = [], notifyWhenWaiting: Bool = true, reopenSessions: Bool = true,
                 disabledTools: [String] = AppConfig.defaultDisabledTools, claudeCommand: String = "claude",
-                freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30,
-                handoffContextTokens: Int = ContextLimits.defaultHandoff, generateTitles: Bool = true,
+                freezeAfterMinutes: Int = 2, hibernateAfterMinutes: Int = 30, generateTitles: Bool = true,
                 titleModel: String = "haiku", accounts: [ClaudeAccount] = [], activeAccount: String? = nil) {
         self.workspaces = workspaces
         self.notifyWhenWaiting = notifyWhenWaiting
@@ -135,14 +132,11 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.claudeCommand = claudeCommand
         self.freezeAfterMinutes = freezeAfterMinutes
         self.hibernateAfterMinutes = hibernateAfterMinutes
-        self.handoffContextTokens = handoffContextTokens
         self.generateTitles = generateTitles
         self.titleModel = titleModel
         self.accounts = accounts
         self.activeAccount = activeAccount
     }
-
-    public var contextLimits: ContextLimits { ContextLimits(handoff: handoffContextTokens) }
 
     /// The account sessions start in. With no accounts set, Claude Code's default login, named `fallback`.
     public func currentAccount(fallback: String) -> ClaudeAccount {
@@ -159,7 +153,6 @@ public struct AppConfig: Codable, Equatable, Sendable {
         claudeCommand = try c.decodeIfPresent(String.self, forKey: .claudeCommand) ?? "claude"
         freezeAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .freezeAfterMinutes) ?? 2
         hibernateAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateAfterMinutes) ?? 30
-        handoffContextTokens = try c.decodeIfPresent(Int.self, forKey: .handoffContextTokens) ?? ContextLimits.defaultHandoff
         generateTitles = try c.decodeIfPresent(Bool.self, forKey: .generateTitles) ?? true
         titleModel = try c.decodeIfPresent(String.self, forKey: .titleModel) ?? "haiku"
         accounts = try c.decodeIfPresent([ClaudeAccount].self, forKey: .accounts) ?? []

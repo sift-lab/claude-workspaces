@@ -50,14 +50,13 @@ final class AccountSwitcher {
     }
 
     /// Restarts in the active account each session that is still in another one and is at rest:
-    /// its turn over, its box seen empty, no command running in the background, no recycle under way.
+    /// its turn over, its box seen empty, no command running in the background.
     /// The rest move when they get there.
     func moveSessions() {
         let target = model.activeAccount.name
         for runtime in model.sessions where !runtime.isTerminal && !runtime.shellOnly && runtime.host.isRunning {
             guard let account = runtime.account, account != target,
                   runtime.status == .idle || runtime.status == .done,
-                  !model.recycler.isBusy(runtime),
                   !(runtime.host.pid.map(ProcessTree.runsShell(under:)) ?? false),
                   PromptScreen.inputIsEmpty(runtime.host.screen(lines: 400)) == true else { continue }
             model.relaunch(runtime, note: "passando para a \(target): a conversa continua")

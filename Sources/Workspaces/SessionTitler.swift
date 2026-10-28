@@ -15,8 +15,7 @@ final class SessionTitler {
     func promptSubmitted(_ prompt: String, runtime: SessionRuntime) -> String? {
         if let command = TitleCommand.parse(prompt) { return run(command, runtime: runtime) }
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        // A recycle's fixed resume message is not the task: not remembered, and the title from before the /clear stays.
-        guard !runtime.isTerminal, !text.isEmpty, !model.recycler.isBusy(runtime) else { return nil }
+        guard !runtime.isTerminal, !text.isEmpty else { return nil }
         runtime.remember(prompt: text)
         guard model.config.generateTitles, runtime.title == nil, runtime.titlePending == nil else { return nil }
         generate(runtime, prompts: [text])
@@ -24,9 +23,7 @@ final class SessionTitler {
     }
 
     /// SessionStart after a /clear: a new task starts, the old title goes to the history.
-    /// A recycle keeps it, since the work goes on.
     func cleared(_ runtime: SessionRuntime) {
-        guard !model.recycler.isBusy(runtime) else { return }
         if let title = runtime.title {
             runtime.titleHistory = Array(([title.tab] + runtime.titleHistory.filter { $0 != title.tab }).prefix(5))
         }

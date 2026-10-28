@@ -50,8 +50,6 @@ final class AppModel {
     private(set) var appUsage: Usage = .zero
     /// Tokens the sessions spend and the account's limit.
     let tokens = TokenMonitor()
-    /// recycle_self, recycle_session and close_session. Set at the end of init.
-    @ObservationIgnored private(set) var recycler: Recycler!
     /// The tab and the title of each task, `/titulo` and Renomear. Set at the end of init.
     @ObservationIgnored private(set) var titler: SessionTitler!
     /// Moves the sessions to another Claude Code account. Set at the end of init.
@@ -104,7 +102,6 @@ final class AppModel {
         }
         slowTimer?.tolerance = 5
         Notifier.shared.setUp { [weak self] sessionId in self?.focus(sessionId: sessionId) }
-        recycler = Recycler(model: self)
         titler = SessionTitler(model: self)
         accounts = AccountSwitcher(model: self)
         updater = Updater(model: self)
@@ -724,7 +721,6 @@ final class AppModel {
 
     func closeSession(_ id: UUID) {
         guard let runtime = session(id) else { return }
-        recycler.forget(id)
         runtime.sleep = .awake
         runtime.host.terminate()
         pendingPaste[id] = nil
@@ -772,7 +768,7 @@ final class AppModel {
         switch request.kind {
         case .hook:
             // A hook from a process that was already replaced (a hibernated one exiting late) is dropped.
-            // The reply's text, when not empty, is JSON the hook prints for Claude Code.
+            // The reply's text, when not empty, is JSON the hook prints for Claude Code (the answer to `/titulo`).
             var output = ""
             if let caller, let payload = request.payload, request.launch.flatMap(Int.init) ?? caller.launch == caller.launch {
                 output = applyHook(payload, to: caller) ?? ""
@@ -789,7 +785,6 @@ final class AppModel {
                       String(describing: reading.fiveHour?.percent))
                 #endif
                 tokens.receive(reading, from: caller)
-                recycler.statusLine(reading, runtime: caller)
             }
             return IPCResponse(ok: true, text: "")
         case .tool:
@@ -886,20 +881,14 @@ final class AppModel {
         updateBadge()
         if runtime.status != before { updateKeepAwake() }
 
-        var output: String?
         switch update.event {
         case "SessionStart" where update.source == "clear":
             titler.cleared(runtime)
-            output = recycler.sessionStartContext(for: runtime)
         case "UserPromptSubmit":
             if let prompt = update.prompt { _ = titler.promptSubmitted(prompt, runtime: runtime) }
-            output = handoffReminder(runtime, event: update.event)
-        case "PostToolUse":
-            output = handoffReminder(runtime, event: update.event)
         default:
             break
         }
-        recycler.hook(update, runtime: runtime)
         if update.event == "StopFailure" { accounts.turnFailed(update.failure, runtime: runtime) }
         // A session left in the old account moves once its turn is over, after the hook has answered.
         if let account = runtime.account, account != activeAccount.name, runtime.status == .done || runtime.status == .idle {
@@ -908,7 +897,7 @@ final class AppModel {
                 self?.accounts.moveSessions()
             }
         }
-        return output
+        return nil
     }
 
     /// The name follows the branch while it is the branch's (or the worktree's) name: a checkout
@@ -925,33 +914,6 @@ final class AppModel {
                 runtime.branchSeen = branch
                 self.persist(runtime)
             }
-        }
-    }
-
-    var contextLimits: ContextLimits { config.contextLimits }
-
-    /// Above the limit, the session is told to write its Passagem: once on crossing, then every 50 mil.
-    private func handoffReminder(_ runtime: SessionRuntime, event: String) -> String? {
-        guard !runtime.isTerminal, let conversation = runtime.claudeSessionId, !recycler.isBusy(runtime) else { return nil }
-        var last = runtime.handoffReminder?.conversation == conversation ? runtime.handoffReminder?.tokens : nil
-        let text = contextLimits.reminder(tokens: tokens.context(runtime), lastWarned: &last)
-        runtime.handoffReminder = (conversation, last)
-        return text.map { HookOutput.additionalContext(event: event, $0) }
-    }
-
-    /// Above 500 mil: one notification per conversation, and the mark turns red. The model is never
-    /// switched and nothing is compacted on purpose: compaction summarizes and loses detail.
-    func checkContextAlarms() {
-        let limits = contextLimits
-        for runtime in sessions where !runtime.isTerminal {
-            guard let conversation = runtime.claudeSessionId, runtime.alarmedConversation != conversation,
-                  let context = tokens.context(runtime), limits.level(context) == .alarm else { continue }
-            runtime.alarmedConversation = conversation
-            let projectName = project(runtime.projectId)?.project.name ?? ""
-            Notifier.shared.post(
-                title: "\(displayLabel(runtime)) passou de \(TokenFormat.tokens(limits.alarm)) de contexto",
-                body: "\(projectName): contexto em \(TokenFormat.tokens(context)). A sessão precisa escrever a Passagem no FRENTE.md e chamar recycle_self.",
-                sessionId: runtime.id)
         }
     }
 
